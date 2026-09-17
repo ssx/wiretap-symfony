@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Ssx\Wiretap\Query\ExchangeQuery;
 use Ssx\Wiretap\Reader\NdjsonReader;
 use Ssx\Wiretap\Recorder;
+use Ssx\Wiretap\Sink\InMemorySink;
 use Ssx\Wiretap\Symfony\Tests\TestKernel;
 use Ssx\Wiretap\Symfony\WiretapHttpClient;
 use Ssx\Wiretap\Wiretap;
@@ -428,5 +429,96 @@ describe('resource fixes found by review', function (): void {
 
         expect($tester->getStatusCode())->toBe(0)
             ->and($tester->getDisplay())->not->toBe('');
+    });
+});
+
+describe('error chunks in a stream', function (): void {
+    beforeEach(function (): void {
+        $this->server = startStallingServer();
+        $this->slowUrl = 'http://127.0.0.1:' . STALLING_SERVER_PORT . '/slow';
+    });
+
+    afterEach(function (): void {
+        stopStallingServer($this->server);
+    });
+
+    it('does not throw from current() before the caller can inspect the chunk', function (): void {
+        // ErrorChunk::isLast() throws. Calling it unconditionally meant
+        // Symfony's own documented pattern — foreach stream, then
+        // `if ($chunk->isTimeout()) continue;` — threw from inside current()
+        // before the caller's check could run. This happened even with
+        // capture disabled, because the decorator is always installed.
+        $client = new WiretapHttpClient(
+            new \Symfony\Component\HttpClient\NativeHttpClient(),
+            new Recorder(sink: new InMemorySink(), enabled: false),
+        );
+
+        $response = $client->request('GET', $this->slowUrl);
+        $sawTimeout = false;
+
+        foreach ($client->stream($response, 0.3) as $chunk) {
+            if ($chunk->isTimeout()) {
+                $sawTimeout = true;
+
+                break;
+            }
+        }
+
+        expect($sawTimeout)->toBeTrue();
+    });
+
+    it('behaves exactly as the undecorated client does', function (): void {
+        $drive = static function ($client, string $url): string {
+            $response = $client->request('GET', $url);
+
+            try {
+                foreach ($client->stream($response, 0.3) as $chunk) {
+                    if ($chunk->isTimeout()) {
+                        return 'timeout-chunk';
+                    }
+                }
+            } catch (\Throwable $e) {
+                return 'threw ' . $e::class;
+            }
+
+            return 'completed';
+        };
+
+        $plain = $drive(new \Symfony\Component\HttpClient\NativeHttpClient(), $this->slowUrl);
+        $wrapped = $drive(
+            new WiretapHttpClient(
+                new \Symfony\Component\HttpClient\NativeHttpClient(),
+                new Recorder(sink: new InMemorySink(), enabled: false),
+            ),
+            $this->slowUrl,
+        );
+
+        expect($wrapped)->toBe($plain)
+            ->and($plain)->toBe('timeout-chunk');
+    });
+
+    it('records an exchange when the stream ends in an error', function (): void {
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path, 'presets' => []]);
+
+        $client = new WiretapHttpClient(
+            new \Symfony\Component\HttpClient\NativeHttpClient(),
+            recorder($kernel),
+        );
+
+        $response = $client->request('GET', $this->slowUrl);
+
+        foreach ($client->stream($response, 0.3) as $chunk) {
+            // isTimeout() both inspects and acknowledges. Symfony's ErrorChunk
+            // destructor rethrows an error nobody acknowledged, in the plain
+            // client too — so a consumer that only calls getError() is
+            // misusing the API, not hitting a wiretap bug.
+            if ($chunk->isTimeout()) {
+                break;
+            }
+        }
+
+        recorder($kernel)->flush();
+
+        expect(exchangesIn($this->path))->toHaveCount(1);
     });
 });

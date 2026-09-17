@@ -42,10 +42,31 @@ final class WiretapResponseStream implements ResponseStreamInterface
     {
         $chunk = $this->inner->current();
 
+        // getError() first, and never isLast() on an error chunk.
+        //
+        // ErrorChunk::isLast() *throws* — TimeoutException for an idle
+        // timeout, TransportException otherwise. Calling it unconditionally
+        // meant Symfony's own documented pattern
+        //
+        //     foreach ($client->stream($r, 1.0) as $chunk) {
+        //         if ($chunk->isTimeout()) { continue; }
+        //
+        // threw from inside current(), before the caller's isTimeout() check
+        // could run. It also silently disabled RetryableHttpClient, which
+        // guards on getError() before isLast() and so never saw the failure it
+        // was there to retry. Both happened even with capture disabled,
+        // because the decorator is always installed.
+        if ($chunk->getError() !== null) {
+            // The transfer is over, and the error is the outcome. Record it
+            // without touching anything that throws.
+            $this->commitCurrent();
+
+            return $chunk;
+        }
+
         // ResponseStreamInterface extends Iterator, so foreach drives these
-        // methods rather than getIterator(). Committing here is where a
-        // stream-consumed response actually gets recorded; commit() is
-        // guarded, so being called for every chunk costs nothing.
+        // methods rather than getIterator(). commit() is guarded, so being
+        // called for every chunk costs nothing.
         if ($chunk->isLast()) {
             $this->commitCurrent();
         }
