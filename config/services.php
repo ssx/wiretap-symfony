@@ -11,15 +11,19 @@ use Ssx\Wiretap\Recorder;
 use Ssx\Wiretap\Redaction\Redactor;
 use Ssx\Wiretap\Symfony\Command\WiretapCommand;
 use Ssx\Wiretap\Symfony\EventListener\CorrelationListener;
+use Ssx\Wiretap\Symfony\Factory\ActiveRecorder;
 use Ssx\Wiretap\Symfony\Factory\RecorderFactory;
 use Ssx\Wiretap\Symfony\SymfonyContextEnricher;
 use Ssx\Wiretap\Symfony\WiretapHttpClient;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
 
 return static function (ContainerConfigurator $container): void {
     $services = $container->services();
+
+    $services->set(ActiveRecorder::class);
 
     $services->set(SymfonyContextEnricher::class)
         ->args([service('request_stack')->nullOnInvalid()]);
@@ -51,11 +55,19 @@ return static function (ContainerConfigurator $container): void {
     // Decorate Symfony's HttpClient. It has no middleware concept, so a
     // decorator is the supported extension point — TraceableHttpClient and the
     // profiler panel work the same way.
+    // `null` for the invalid behaviour: installing the bundle in an
+    // application without symfony/http-client must not fail container
+    // compilation. Decoration simply does not happen.
+    //
+    // The recorder is a closure resolved per request, not the concrete
+    // service. The container builds this client once, and a test calling
+    // Wiretap::fake() afterwards must be able to redirect its traffic —
+    // otherwise test traffic keeps reaching the configured file sink.
     $services->set(WiretapHttpClient::class)
-        ->decorate('http_client', null, 250)
+        ->decorate('http_client', null, 250, ContainerInterface::NULL_ON_INVALID_REFERENCE)
         ->args([
-            service('.inner'),
-            service(Recorder::class),
+            service('.inner')->nullOnInvalid(),
+            service(ActiveRecorder::class),
         ]);
 
     $services->set(WiretapCommand::class)

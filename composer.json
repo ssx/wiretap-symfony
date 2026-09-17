@@ -3,7 +3,13 @@
     "description": "Symfony bundle for wiretap. Captures outbound HTTP from Symfony HttpClient and Guzzle, tagged with the route or command that caused it.",
     "type": "symfony-bundle",
     "license": "MIT",
-    "keywords": ["symfony", "http", "debugging", "logging", "httpclient"],
+    "keywords": [
+        "symfony",
+        "http",
+        "debugging",
+        "logging",
+        "httpclient"
+    ],
     "authors": [
         {
             "name": "Scott Robinson",
@@ -12,7 +18,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "ssx/wiretap": "~0.0.2 || dev-main",
+        "ssx/wiretap": "~0.0.3 || dev-main",
         "symfony/config": "^6.4 || ^7.0",
         "symfony/dependency-injection": "^6.4 || ^7.0",
         "symfony/http-kernel": "^6.4 || ^7.0",
@@ -31,7 +37,10 @@
         "ssx/wiretap-guzzle": "Capture Guzzle clients built outside the container"
     },
     "repositories": [
-        { "type": "vcs", "url": "https://github.com/ssx/wiretap" }
+        {
+            "type": "vcs",
+            "url": "https://github.com/ssx/wiretap"
+        }
     ],
     "autoload": {
         "psr-4": {
@@ -45,7 +54,9 @@
     },
     "config": {
         "sort-packages": true,
-        "allow-plugins": { "pestphp/pest-plugin": true }
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
     },
     "minimum-stability": "dev",
     "prefer-stable": true
