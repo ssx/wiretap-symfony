@@ -60,10 +60,12 @@ final class WiretapHttpClient implements HttpClientInterface
     {
         $recorder = ($this->resolveRecorder)();
 
-        // Symfony resolves relative URLs against base_uri, so the URL here may
-        // not be the one actually requested. getInfo('url') on the response is
-        // authoritative, and the gate re-runs against it.
-        if (!$recorder->shouldCapture($url)) {
+        // Resolve against base_uri before gating. Passing the raw argument
+        // showed the gate only `/private` for a base_uri pointing at a blocked
+        // host, so the blocked body was read and only then rejected. Nothing
+        // was stored, but the payload existed — which is what the gate exists
+        // to prevent.
+        if (!$recorder->shouldCapture($this->resolveUrl($url, $options))) {
             return $this->inner->request($method, $url, $options);
         }
 
@@ -102,12 +104,29 @@ final class WiretapHttpClient implements HttpClientInterface
         }
 
         $unwrapped = [];
+        $wrappers = new \SplObjectStorage();
 
         foreach ($responses as $response) {
-            $unwrapped[] = $response instanceof WiretapResponse ? $response->inner() : $response;
+            if ($response instanceof WiretapResponse) {
+                $inner = $response->inner();
+                $wrappers[$inner] = $response;
+                $unwrapped[] = $inner;
+
+                continue;
+            }
+
+            $unwrapped[] = $response;
         }
 
-        return $this->inner->stream($unwrapped, $timeout);
+        // Keys are mapped back to the wrappers the caller was given. Yielding
+        // the inner responses broke `$key === $response` comparisons and any
+        // response-keyed map, which is the normal way to drive a multiplexed
+        // stream. Completion also has to commit, or a fully consumed stream
+        // recorded nothing at all.
+        return new WiretapResponseStream(
+            $this->inner->stream($unwrapped, $timeout),
+            $wrappers,
+        );
     }
 
     /**
@@ -239,6 +258,27 @@ final class WiretapHttpClient implements HttpClientInterface
         // A closure, a resource or an iterable. What was configured is not
         // what will be transmitted, and reading it here would consume it.
         return CapturedBody::omitted(CapturedBody::OMITTED_STREAMING);
+    }
+
+    /**
+     * The URL as Symfony will actually request it.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveUrl(string $url, array $options): string
+    {
+        $base = $options['base_uri'] ?? null;
+
+        if (!is_string($base) || $base === '') {
+            return $url;
+        }
+
+        // Already absolute.
+        if (preg_match('~^[a-z][a-z0-9+.-]*://~i', $url) === 1) {
+            return $url;
+        }
+
+        return rtrim($base, '/') . '/' . ltrim($url, '/');
     }
 
     /**
