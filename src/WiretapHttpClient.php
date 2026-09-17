@@ -33,18 +33,26 @@ final class WiretapHttpClient implements HttpClientInterface
     private readonly \Closure $resolveRecorder;
 
     /**
-     * @param Recorder|\Closure(): Recorder $recorder
+     * @param Recorder|callable(): Recorder $recorder
      */
     public function __construct(
         private readonly HttpClientInterface $inner,
-        Recorder|\Closure $recorder,
-        private readonly int $maxBodyBytes = 65536,
+        Recorder|callable $recorder,
+        /**
+         * A hard memory ceiling, not the redaction limit. Capturing only 64
+         * KiB handed the redactor truncated JSON it could not parse, so
+         * configured body-path rules silently did nothing.
+         */
+        private readonly int $maxBodyBytes = 1_048_576,
     ) {
         $this->resolveRecorder = $recorder instanceof Recorder
             ? static fn (): Recorder => $recorder
-            : $recorder;
+            : \Closure::fromCallable($recorder);
     }
 
+    /**
+     * @param array<string, mixed> $options
+     */
     /**
      * @param array<string, mixed> $options
      */
@@ -64,22 +72,25 @@ final class WiretapHttpClient implements HttpClientInterface
         $sequence = Correlation::nextSequence();
         $correlationId = Correlation::id();
 
-        $requestHeaders = $this->requestHeaders($options);
+        $requestHeaders = $this->rememberGeneratedCredentials($options, $this->requestHeaders($options));
         $requestBody = $this->requestBody($options);
 
         $response = $this->inner->request($method, $url, $options);
 
         return new WiretapResponse(
             $response,
-            function (ResponseInterface $resolved, ?\Throwable $error) use (
+            function (ResponseInterface $resolved, ?\Throwable $error, bool $mayReadBody) use (
                 $recorder, $id, $correlationId, $sequence, $method, $url,
                 $requestHeaders, $requestBody, $startedAt
             ): void {
                 $recorder->record($this->buildExchange(
-                    $resolved, $error, $id, $correlationId, $sequence,
+                    $resolved, $error, $mayReadBody, $id, $correlationId, $sequence,
                     $method, $url, $requestHeaders, $requestBody, $startedAt,
                 ));
             },
+            // `buffer => false` means the body can only be read once, so
+            // capture must not be the one to read it.
+            buffered: ($options['buffer'] ?? true) !== false,
         );
     }
 
@@ -110,6 +121,7 @@ final class WiretapHttpClient implements HttpClientInterface
     private function buildExchange(
         ResponseInterface $response,
         ?\Throwable $error,
+        bool $mayReadBody,
         string $id,
         string $correlationId,
         int $sequence,
@@ -136,9 +148,13 @@ final class WiretapHttpClient implements HttpClientInterface
             status: $status,
             reason: null,
             responseHeaders: $this->responseHeaders($response),
-            responseBody: $this->responseBody($response, $status),
+            responseBody: $this->responseBody($response, $status, $mayReadBody),
             timings: $this->timings($info, $startedAt),
-            error: $status === null && $error !== null ? TransferError::fromThrowable($error) : null,
+            // Not `$status === null && ...`: curl can deliver 200 headers and
+            // then fail mid-body. Discarding the error because a status
+            // existed recorded a failed transfer as a success, and
+            // always-keep-failures sampling then dropped it.
+            error: $error !== null ? TransferError::fromThrowable($error) : null,
             startedAt: $startedAt,
             sequence: $sequence,
             pid: getmypid() ?: null,
@@ -182,8 +198,21 @@ final class WiretapHttpClient implements HttpClientInterface
      */
     private function requestBody(array $options): CapturedBody
     {
+        $declaredType = $this->declaredContentType($options);
+
         if (isset($options['json'])) {
-            $encoded = json_encode($options['json'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $json = $options['json'];
+
+            // Symfony serialises this itself. Serialising it here as well
+            // invoked user code twice: a JsonSerializable that increments a
+            // counter captured {"counter":1} and transmitted {"counter":2},
+            // and any side effect in jsonSerialize() happened twice. Objects
+            // are therefore described rather than encoded.
+            if (is_object($json)) {
+                return CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, null, 'application/json');
+            }
+
+            $encoded = json_encode($json, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
             return $encoded === false
                 ? CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE)
@@ -197,16 +226,71 @@ final class WiretapHttpClient implements HttpClientInterface
         }
 
         if (is_string($body)) {
-            return $this->cap($body, null);
+            // Passing null here lost the declared content type, so the
+            // redactor could not choose form parsing and body_paths did
+            // nothing on a urlencoded body. It also defeated the binary gate.
+            return $this->cap($body, $declaredType);
         }
 
         if (is_array($body)) {
-            return $this->cap(http_build_query($body), 'application/x-www-form-urlencoded');
+            return $this->cap(http_build_query($body), $declaredType ?? 'application/x-www-form-urlencoded');
         }
 
         // A closure, a resource or an iterable. What was configured is not
         // what will be transmitted, and reading it here would consume it.
         return CapturedBody::omitted(CapturedBody::OMITTED_STREAMING);
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private function declaredContentType(array $options): ?string
+    {
+        $headers = $options['headers'] ?? [];
+
+        if (!is_array($headers)) {
+            return null;
+        }
+
+        foreach ($headers as $name => $value) {
+            if (is_int($name) && is_string($value) && stripos($value, 'content-type:') === 0) {
+                return trim(substr($value, 13));
+            }
+
+            if (is_string($name) && strcasecmp($name, 'content-type') === 0) {
+                $first = is_array($value) ? ($value[0] ?? null) : $value;
+
+                if (is_scalar($first)) {
+                    return (string) $first;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Credentials Symfony generates from auth_bearer / auth_basic never appear
+     * in the caller's headers, so the redactor never learned them and a
+     * response echoing one recorded it verbatim.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function rememberGeneratedCredentials(array $options, Headers $headers): Headers
+    {
+        $pairs = $headers->pairs();
+
+        if (isset($options['auth_bearer']) && is_scalar($options['auth_bearer'])) {
+            $pairs[] = ['Authorization', 'Bearer ' . $options['auth_bearer']];
+        }
+
+        if (isset($options['auth_basic'])) {
+            $basic = $options['auth_basic'];
+            $credential = is_array($basic) ? implode(':', array_map('strval', $basic)) : (string) $basic;
+            $pairs[] = ['Authorization', 'Basic ' . base64_encode($credential)];
+        }
+
+        return Headers::fromPairs($pairs);
     }
 
     private function responseHeaders(ResponseInterface $response): Headers
@@ -226,10 +310,19 @@ final class WiretapHttpClient implements HttpClientInterface
         }
     }
 
-    private function responseBody(ResponseInterface $response, ?int $status): CapturedBody
+    private function responseBody(ResponseInterface $response, ?int $status, bool $mayReadBody): CapturedBody
     {
         if ($status === null) {
             return CapturedBody::none();
+        }
+
+        // Reading here when the caller asked for a stream, or only looked at
+        // the status, has two effects the application feels: `buffer => false`
+        // makes the body unreadable a second time, so their getContent()
+        // throws; and a large or endless download is pulled into memory by
+        // what was meant to be a headers-only operation.
+        if (!$mayReadBody) {
+            return CapturedBody::omitted(CapturedBody::OMITTED_STREAMING);
         }
 
         try {

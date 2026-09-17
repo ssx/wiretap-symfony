@@ -24,11 +24,13 @@ final class WiretapResponse implements ResponseInterface
     private bool $recorded = false;
 
     /**
-     * @param \Closure(ResponseInterface, ?\Throwable): void $record
+     * @param \Closure(ResponseInterface, ?\Throwable, bool): void $record
+     * @param bool $buffered Whether the body can be read again after capture
      */
     public function __construct(
         private readonly ResponseInterface $inner,
         private readonly \Closure $record,
+        private readonly bool $buffered = true,
     ) {
     }
 
@@ -39,7 +41,11 @@ final class WiretapResponse implements ResponseInterface
 
     public function getStatusCode(): int
     {
-        return $this->capturing(fn (): int => $this->inner->getStatusCode());
+        // Resolves the transfer but does not commit. Committing here lost the
+        // body for good: the record was written before the application had
+        // asked for the content, and the once-only guard then skipped the
+        // call that would have captured it.
+        return $this->resolving(fn (): int => $this->inner->getStatusCode());
     }
 
     /**
@@ -47,12 +53,15 @@ final class WiretapResponse implements ResponseInterface
      */
     public function getHeaders(bool $throw = true): array
     {
-        return $this->capturing(fn (): array => $this->inner->getHeaders($throw));
+        return $this->resolving(fn (): array => $this->inner->getHeaders($throw));
     }
 
     public function getContent(bool $throw = true): string
     {
-        return $this->capturing(fn (): string => $this->inner->getContent($throw));
+        // The application has asked for the body, so reading it for capture
+        // costs nothing extra on a buffered response. On an unbuffered one it
+        // cannot be read twice, so capture records it as streaming instead.
+        return $this->capturing(fn (): string => $this->inner->getContent($throw), mayReadBody: $this->buffered);
     }
 
     /**
@@ -60,13 +69,13 @@ final class WiretapResponse implements ResponseInterface
      */
     public function toArray(bool $throw = true): array
     {
-        return $this->capturing(fn (): array => $this->inner->toArray($throw));
+        return $this->capturing(fn (): array => $this->inner->toArray($throw), mayReadBody: $this->buffered);
     }
 
     public function cancel(): void
     {
         $this->inner->cancel();
-        $this->commit(null);
+        $this->commit(null, mayReadBody: false);
     }
 
     /**
@@ -82,7 +91,7 @@ final class WiretapResponse implements ResponseInterface
         // A response created and never read still happened. Record it rather
         // than lose it — though with no content, since reading it here could
         // block on a transfer the application deliberately abandoned.
-        $this->commit(null);
+        $this->commit(null, mayReadBody: false);
     }
 
     /**
@@ -92,24 +101,53 @@ final class WiretapResponse implements ResponseInterface
      *
      * @return T
      */
-    private function capturing(\Closure $operation): mixed
+    /**
+     * Run an operation that resolves the transfer without finishing the
+     * record. Only a failure commits, since there will be nothing else to
+     * commit if the transfer never completes.
+     *
+     * @template T
+     *
+     * @param \Closure(): T $operation
+     *
+     * @return T
+     */
+    private function resolving(\Closure $operation): mixed
+    {
+        try {
+            return $operation();
+        } catch (\Throwable $e) {
+            $this->commit($e, mayReadBody: false);
+
+            throw $e;
+        }
+    }
+
+    /**
+     * @template T
+     *
+     * @param \Closure(): T $operation
+     *
+     * @return T
+     */
+    private function capturing(\Closure $operation, bool $mayReadBody = true): mixed
     {
         try {
             $result = $operation();
         } catch (\Throwable $e) {
             // A 4xx/5xx with $throw = true lands here, and so does a transport
             // failure. Both are exchanges worth recording.
-            $this->commit($e);
+            $this->commit($e, $mayReadBody);
 
             throw $e;
         }
 
-        $this->commit(null);
+        $this->commit(null, $mayReadBody);
 
         return $result;
     }
 
-    private function commit(?\Throwable $error): void
+    private function commit(?\Throwable $error, bool $mayReadBody = true): void
     {
         if ($this->recorded) {
             return;
@@ -118,7 +156,7 @@ final class WiretapResponse implements ResponseInterface
         $this->recorded = true;
 
         try {
-            ($this->record)($this->inner, $error);
+            ($this->record)($this->inner, $error, $mayReadBody);
         } catch (\Throwable) {
             // Instrumentation must never change application behaviour.
         }

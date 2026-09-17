@@ -109,6 +109,8 @@ describe('the bundle', function (): void {
             // A connection failure is still an exchange.
         }
 
+        unset($response);
+
         recorder($kernel)->flush();
         $exchanges = exchangesIn($this->path);
 
@@ -146,8 +148,10 @@ describe('capture through the decorator', function (): void {
         ]);
 
         // Symfony responses are lazy: the exchange is not complete until
-        // something reads it.
-        expect($response->getStatusCode())->toBe(201);
+        // something reads it. Reading the content is also what permits body
+        // capture — status alone deliberately does not pull the body.
+        expect($response->getStatusCode())->toBe(201)
+            ->and($response->getContent())->toContain('42');
 
         recorder($kernel)->flush();
         $exchanges = exchangesIn($this->path);
@@ -189,7 +193,8 @@ describe('capture through the decorator', function (): void {
         $response = mockedClient($kernel, [new MockResponse('{"error":"nope"}', ['http_code' => 422])])
             ->request('GET', 'https://api.example.com/v1');
 
-        expect($response->getStatusCode())->toBe(422);
+        expect($response->getStatusCode())->toBe(422)
+            ->and($response->getContent(false))->toContain('nope');
 
         recorder($kernel)->flush();
         $exchanges = exchangesIn($this->path);
@@ -234,5 +239,123 @@ describe('capture through the decorator', function (): void {
 
         expect($written)->not->toContain('"123"')
             ->and($written)->toContain('visa');
+    });
+});
+
+describe('hardening found by review', function (): void {
+    it('does not consume an unbuffered response', function (): void {
+        // Capture called getContent() from getStatusCode(). With buffer=>false
+        // that consumed the body, and the application's own getContent() then
+        // threw "Cannot get the content of the response twice".
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+
+        $response = mockedClient($kernel, [new MockResponse('streamed payload', ['http_code' => 200])])
+            ->request('GET', 'https://api.example.com/v1', ['buffer' => false]);
+
+        expect($response->getStatusCode())->toBe(200)
+            ->and($response->getContent())->toBe('streamed payload');
+    });
+
+    it('does not pull a body when only the status is read', function (): void {
+        // A headers-only operation must not download a large or endless body.
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+
+        $response = mockedClient($kernel, [new MockResponse('body', ['http_code' => 200])])
+            ->request('GET', 'https://api.example.com/v1');
+
+        $response->getStatusCode();
+        unset($response);
+        recorder($kernel)->flush();
+
+        $exchanges = exchangesIn($this->path);
+
+        expect($exchanges)->toHaveCount(1)
+            ->and($exchanges[0]->status)->toBe(200)
+            ->and($exchanges[0]->responseBody->isPresent())->toBeFalse();
+    });
+
+    it('keeps the declared content type on a string body', function (): void {
+        // Passing null lost the type, so the redactor could not choose form
+        // parsing and body_paths did nothing on a urlencoded body.
+        $kernel = bootKernel([
+            'enabled' => true,
+            'path' => $this->path,
+            'presets' => [],
+            'redaction' => ['body_paths' => ['password']],
+        ]);
+
+        mockedClient($kernel, [new MockResponse('{}', ['http_code' => 200])])
+            ->request('POST', 'https://api.example.com/login', [
+                'headers' => ['Content-Type' => 'application/x-www-form-urlencoded'],
+                'body' => 'password=ordinary-secret&user=alice',
+            ])->getContent();
+
+        recorder($kernel)->flush();
+        $written = json_encode(exchangesIn($this->path));
+
+        expect($written)->not->toContain('ordinary-secret')
+            ->and($written)->toContain('alice');
+    });
+
+    it('does not serialise a JsonSerializable body twice', function (): void {
+        // Serialising here as well as in Symfony invoked user code twice: a
+        // counter captured 1 and transmitted 2, and side effects happened
+        // twice.
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+
+        $payload = new class implements JsonSerializable {
+            public int $calls = 0;
+
+            public function jsonSerialize(): mixed
+            {
+                ++$this->calls;
+
+                return ['counter' => $this->calls];
+            }
+        };
+
+        mockedClient($kernel, [new MockResponse('{}', ['http_code' => 200])])
+            ->request('POST', 'https://api.example.com/v1', ['json' => $payload])
+            ->getContent();
+
+        expect($payload->calls)->toBe(1);
+    });
+
+    it('learns a credential Symfony generated from auth_bearer', function (): void {
+        // The token never appears in the caller's headers, so a response
+        // echoing it was recorded verbatim.
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path, 'presets' => []]);
+
+        mockedClient($kernel, [new MockResponse('{"echo":"opaque-secret-123"}', ['http_code' => 200])])
+            ->request('GET', 'https://api.example.com/v1', ['auth_bearer' => 'opaque-secret-123'])
+            ->getContent();
+
+        recorder($kernel)->flush();
+
+        expect(json_encode(exchangesIn($this->path)))->not->toContain('opaque-secret-123');
+    });
+
+    it('records a transport failure that happened after a status arrived', function (): void {
+        // curl can deliver 200 headers and then fail mid-body. Discarding the
+        // error because a status existed recorded a failed transfer as a
+        // success, and always-keep-failures sampling then dropped it.
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+
+        $response = mockedClient($kernel, [
+            new MockResponse(['chunk', new \Symfony\Component\HttpClient\Exception\TransportException('broke mid-body')], ['http_code' => 200]),
+        ])->request('GET', 'https://api.example.com/v1');
+
+        try {
+            $response->getContent();
+        } catch (\Throwable) {
+            // expected
+        }
+
+        recorder($kernel)->flush();
+        $exchanges = exchangesIn($this->path);
+
+        expect($exchanges)->toHaveCount(1)
+            ->and($exchanges[0]->error)->not->toBeNull()
+            ->and($exchanges[0]->failed())->toBeTrue();
     });
 });
