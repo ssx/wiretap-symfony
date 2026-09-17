@@ -1,0 +1,52 @@
+{
+    "name": "ssx/wiretap-symfony",
+    "description": "Symfony bundle for wiretap. Captures outbound HTTP from Symfony HttpClient and Guzzle, tagged with the route or command that caused it.",
+    "type": "symfony-bundle",
+    "license": "MIT",
+    "keywords": ["symfony", "http", "debugging", "logging", "httpclient"],
+    "authors": [
+        {
+            "name": "Scott Robinson",
+            "email": "scott@dor.ky"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "ssx/wiretap": "~0.0.2 || dev-main",
+        "symfony/config": "^6.4 || ^7.0",
+        "symfony/dependency-injection": "^6.4 || ^7.0",
+        "symfony/http-kernel": "^6.4 || ^7.0",
+        "symfony/http-client-contracts": "^3.0"
+    },
+    "require-dev": {
+        "symfony/framework-bundle": "^6.4 || ^7.0",
+        "symfony/http-client": "^6.4 || ^7.0",
+        "symfony/console": "^6.4 || ^7.0",
+        "symfony/yaml": "^6.4 || ^7.0",
+        "pestphp/pest": "^2.34 || ^3.0",
+        "phpstan/phpstan": "^1.11"
+    },
+    "suggest": {
+        "ssx/wiretap-auto": "Also captures raw curl_exec() and Guzzle clients constructed in vendor code",
+        "ssx/wiretap-guzzle": "Capture Guzzle clients built outside the container"
+    },
+    "repositories": [
+        { "type": "vcs", "url": "https://github.com/ssx/wiretap" }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Ssx\\Wiretap\\Symfony\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ssx\\Wiretap\\Symfony\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": { "pestphp/pest-plugin": true }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
