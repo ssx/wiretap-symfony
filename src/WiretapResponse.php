@@ -72,6 +72,15 @@ final class WiretapResponse implements ResponseInterface
         return $this->capturing(fn (): array => $this->inner->toArray($throw), mayReadBody: $this->buffered);
     }
 
+    /**
+     * Called when a stream reaches its last chunk. The body was consumed by
+     * the caller through the stream, so capture must not read it again.
+     */
+    public function commitFromStream(): void
+    {
+        $this->commit(null, mayReadBody: false);
+    }
+
     public function cancel(): void
     {
         $this->inner->cancel();

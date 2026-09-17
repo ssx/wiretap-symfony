@@ -359,3 +359,74 @@ describe('hardening found by review', function (): void {
             ->and($exchanges[0]->failed())->toBeTrue();
     });
 });
+
+describe('resource fixes found by review', function (): void {
+    it('gates a relative url against its resolved base_uri', function (): void {
+        // The gate saw only `/private`, so a base_uri pointing at a blocked
+        // host had its body read and only then rejected. Nothing was stored,
+        // but the payload existed.
+        $kernel = bootKernel([
+            'enabled' => true,
+            'path' => $this->path,
+            'presets' => [],
+            'blocklist' => ['blocked.test'],
+        ]);
+
+        $response = mockedClient($kernel, [new MockResponse('{"card":"4111111111111111"}', ['http_code' => 200])])
+            ->request('GET', '/private', ['base_uri' => 'https://blocked.test']);
+
+        // The request still happens; only capture is refused.
+        expect($response->getContent())->toContain('4111');
+
+        recorder($kernel)->flush();
+
+        expect(exchangesIn($this->path))->toBeEmpty();
+    });
+
+    it('yields the caller its own response object when streaming', function (): void {
+        // Yielding the inner response broke `$key === $response` and any
+        // response-keyed map, which is how a multiplexed stream is driven.
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+        $client = mockedClient($kernel, [new MockResponse('streamed', ['http_code' => 200])]);
+
+        $response = $client->request('GET', 'https://api.example.com/v1');
+
+        $seen = [];
+
+        foreach ($client->stream($response) as $key => $chunk) {
+            $seen[] = $key === $response;
+        }
+
+        expect($seen)->not->toBeEmpty()
+            ->and(array_unique($seen))->toBe([true]);
+    });
+
+    it('records a response consumed entirely through stream()', function (): void {
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+        $client = mockedClient($kernel, [new MockResponse('streamed', ['http_code' => 200])]);
+
+        $response = $client->request('GET', 'https://api.example.com/v1');
+
+        foreach ($client->stream($response) as $chunk) {
+            // consume
+        }
+
+        recorder($kernel)->flush();
+
+        expect(exchangesIn($this->path))->toHaveCount(1);
+    });
+
+    it('accepts the documented console options', function (): void {
+        // An IS_ARRAY argument rejects unknown options, so every documented
+        // flag threw "The --failed option does not exist".
+        $kernel = bootKernel(['enabled' => true, 'path' => $this->path]);
+
+        $command = new \Ssx\Wiretap\Symfony\Command\WiretapCommand($this->path, 7);
+        $tester = new \Symfony\Component\Console\Tester\CommandTester($command);
+
+        $tester->execute(['subcommand' => 'list', '--failed' => true, '--limit' => '5']);
+
+        expect($tester->getStatusCode())->toBe(0)
+            ->and($tester->getDisplay())->not->toBe('');
+    });
+});
