@@ -9,6 +9,7 @@ use Ssx\Wiretap\Correlation;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\Recorder;
+use Ssx\Wiretap\Symfony\Internal\UrlResolver;
 use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
 use Ssx\Wiretap\TransferError;
@@ -44,10 +45,51 @@ final class WiretapHttpClient implements HttpClientInterface
          * configured body-path rules silently did nothing.
          */
         private readonly int $maxBodyBytes = 1_048_576,
+        /**
+         * Defaults accumulated through withOptions().
+         *
+         * These used to be handed to the inner client and forgotten, so
+         * capture never saw them. Two things went wrong as a result:
+         * withOptions(['auth_bearer' => '...']) meant the token was never
+         * learned as a secret, and a response echoing it was recorded in
+         * plaintext; and withOptions(['buffer' => false]) was read as buffered,
+         * so capture consumed a body that could only be read once and the
+         * application's getContent() then failed.
+         *
+         * @var array<string, mixed>
+         */
+        private readonly array $defaultOptions = [],
     ) {
         $this->resolveRecorder = $recorder instanceof Recorder
             ? static fn (): Recorder => $recorder
             : \Closure::fromCallable($recorder);
+    }
+
+    /**
+     * Per-request options over the accumulated defaults.
+     *
+     * Symfony's own rule: a per-request option replaces the default of the
+     * same name, except headers, which merge by name with the request winning.
+     *
+     * @param  array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    private function effectiveOptions(array $options): array
+    {
+        if ($this->defaultOptions === []) {
+            return $options;
+        }
+
+        $effective = array_merge($this->defaultOptions, $options);
+
+        $defaultHeaders = $this->defaultOptions['headers'] ?? null;
+        $requestHeaders = $options['headers'] ?? null;
+
+        if (is_array($defaultHeaders) && is_array($requestHeaders)) {
+            $effective['headers'] = array_merge($defaultHeaders, $requestHeaders);
+        }
+
+        return $effective;
     }
 
     /**
@@ -60,12 +102,16 @@ final class WiretapHttpClient implements HttpClientInterface
     {
         $recorder = ($this->resolveRecorder)();
 
-        // Resolve against base_uri before gating. Passing the raw argument
-        // showed the gate only `/private` for a base_uri pointing at a blocked
-        // host, so the blocked body was read and only then rejected. Nothing
-        // was stored, but the payload existed — which is what the gate exists
-        // to prevent.
-        if (!$recorder->shouldCapture($this->resolveUrl($url, $options))) {
+        // Everything below decides what to capture, so it has to see the
+        // options the request will actually run with, defaults included.
+        $effective = $this->effectiveOptions($options);
+
+        // Resolve against base_uri before gating, the way Symfony resolves it.
+        // Passing the raw argument showed the gate only `/private` for a
+        // base_uri pointing at a blocked host, so the blocked body was read and
+        // only then rejected. Nothing was stored, but the payload existed —
+        // which is what the gate exists to prevent.
+        if (!$recorder->shouldCapture(UrlResolver::resolve($url, $effective))) {
             return $this->inner->request($method, $url, $options);
         }
 
@@ -74,8 +120,8 @@ final class WiretapHttpClient implements HttpClientInterface
         $sequence = Correlation::nextSequence();
         $correlationId = Correlation::id();
 
-        $requestHeaders = $this->rememberGeneratedCredentials($options, $this->requestHeaders($options));
-        $requestBody = $this->requestBody($options);
+        $requestHeaders = $this->rememberGeneratedCredentials($effective, $this->requestHeaders($effective));
+        $requestBody = $this->requestBody($effective);
 
         $response = $this->inner->request($method, $url, $options);
 
@@ -96,8 +142,10 @@ final class WiretapHttpClient implements HttpClientInterface
                 ));
             },
             // `buffer => false` means the body can only be read once, so
-            // capture must not be the one to read it.
-            buffered: ($options['buffer'] ?? true) !== false,
+            // capture must not be the one to read it. Read from the effective
+            // options: set through withOptions() it was invisible here, and
+            // capture consumed the application's only read.
+            buffered: ($effective['buffer'] ?? true) !== false,
         );
     }
 
@@ -139,7 +187,14 @@ final class WiretapHttpClient implements HttpClientInterface
      */
     public function withOptions(array $options): static
     {
-        return new self($this->inner->withOptions($options), $this->resolveRecorder, $this->maxBodyBytes);
+        return new self(
+            $this->inner->withOptions($options),
+            $this->resolveRecorder,
+            $this->maxBodyBytes,
+            // Accumulated, because withOptions() can be chained and Symfony
+            // applies every layer.
+            $this->effectiveOptions($options),
+        );
     }
 
     private function buildExchange(
@@ -266,26 +321,6 @@ final class WiretapHttpClient implements HttpClientInterface
         return CapturedBody::omitted(CapturedBody::OMITTED_STREAMING);
     }
 
-    /**
-     * The URL as Symfony will actually request it.
-     *
-     * @param array<string, mixed> $options
-     */
-    private function resolveUrl(string $url, array $options): string
-    {
-        $base = $options['base_uri'] ?? null;
-
-        if (!is_string($base) || $base === '') {
-            return $url;
-        }
-
-        // Already absolute.
-        if (preg_match('~^[a-z][a-z0-9+.-]*://~i', $url) === 1) {
-            return $url;
-        }
-
-        return rtrim($base, '/') . '/' . ltrim($url, '/');
-    }
 
     /**
      * @param array<string, mixed> $options
