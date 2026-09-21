@@ -9,6 +9,7 @@ use Ssx\Wiretap\Sink\InMemorySink;
 use Ssx\Wiretap\Symfony\Tests\TestKernel;
 use Ssx\Wiretap\Symfony\WiretapHttpClient;
 use Ssx\Wiretap\Wiretap;
+use Symfony\Component\HttpClient\Exception\ServerException;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -520,5 +521,87 @@ describe('error chunks in a stream', function (): void {
         recorder($kernel)->flush();
 
         expect(exchangesIn($this->path))->toHaveCount(1);
+    });
+});
+
+describe('an unread response that is dropped', function (): void {
+    /**
+     * Symfony raises for an unread 4xx/5xx from the response's own destructor,
+     * but only while that response has not been initialised. Capture used to
+     * call getHeaders(false) from its destructor, which initialises it without
+     * throwing — so the inner destructor then skipped its status check and the
+     * application's exception disappeared. The plain client threw; the wrapped
+     * one silently succeeded.
+     *
+     * @param callable(): HttpClientInterface $make
+     */
+    function droppedResponseOutcome(callable $make): ?string
+    {
+        try {
+            $response = $make()->request('GET', 'https://api.example.test/boom');
+            unset($response);
+            gc_collect_cycles();
+
+            return null;
+        } catch (\Throwable $e) {
+            return $e::class;
+        }
+    }
+
+    it('raises exactly what the undecorated client raises', function (): void {
+        $plain = droppedResponseOutcome(
+            static fn (): HttpClientInterface => new MockHttpClient(
+                new MockResponse('{"error":1}', ['http_code' => 500]),
+            ),
+        );
+
+        $wrapped = droppedResponseOutcome(static function (): HttpClientInterface {
+            $inner = new MockHttpClient(new MockResponse('{"error":1}', ['http_code' => 500]));
+
+            return new WiretapHttpClient(
+                $inner,
+                static fn (): Recorder => new Recorder(sink: new InMemorySink()),
+            );
+        });
+
+        expect($plain)->toBe(ServerException::class)
+            ->and($wrapped)->toBe($plain);
+    });
+
+    it('still records the exchange it dropped', function (): void {
+        $sink = new InMemorySink();
+        $recorder = new Recorder(sink: $sink);
+
+        $client = new WiretapHttpClient(
+            new MockHttpClient(new MockResponse('{"error":1}', ['http_code' => 500])),
+            static fn (): Recorder => $recorder,
+        );
+
+        try {
+            $response = $client->request('GET', 'https://api.example.test/boom');
+            unset($response);
+            gc_collect_cycles();
+        } catch (\Throwable) {
+            // The application's exception is the point of the test above.
+        }
+
+        $recorder->flush();
+
+        // Not captured at the cost of the exception: both happen.
+        expect($sink->all())->toHaveCount(1)
+            ->and($sink->all()[0]->uri)->toContain('/boom');
+    });
+
+    it('does not raise for a dropped 200, matching the plain client', function (): void {
+        $outcome = droppedResponseOutcome(static function (): HttpClientInterface {
+            $inner = new MockHttpClient(new MockResponse('{"ok":1}', ['http_code' => 200]));
+
+            return new WiretapHttpClient(
+                $inner,
+                static fn (): Recorder => new Recorder(sink: new InMemorySink()),
+            );
+        });
+
+        expect($outcome)->toBeNull();
     });
 });

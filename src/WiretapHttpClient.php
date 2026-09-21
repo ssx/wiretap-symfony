@@ -9,6 +9,7 @@ use Ssx\Wiretap\Correlation;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\Recorder;
+use Ssx\Wiretap\Symfony\Internal\UrlResolver;
 use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
 use Ssx\Wiretap\TransferError;
@@ -44,10 +45,51 @@ final class WiretapHttpClient implements HttpClientInterface
          * configured body-path rules silently did nothing.
          */
         private readonly int $maxBodyBytes = 1_048_576,
+        /**
+         * Defaults accumulated through withOptions().
+         *
+         * These used to be handed to the inner client and forgotten, so
+         * capture never saw them. Two things went wrong as a result:
+         * withOptions(['auth_bearer' => '...']) meant the token was never
+         * learned as a secret, and a response echoing it was recorded in
+         * plaintext; and withOptions(['buffer' => false]) was read as buffered,
+         * so capture consumed a body that could only be read once and the
+         * application's getContent() then failed.
+         *
+         * @var array<string, mixed>
+         */
+        private readonly array $defaultOptions = [],
     ) {
         $this->resolveRecorder = $recorder instanceof Recorder
             ? static fn (): Recorder => $recorder
             : \Closure::fromCallable($recorder);
+    }
+
+    /**
+     * Per-request options over the accumulated defaults.
+     *
+     * Symfony's own rule: a per-request option replaces the default of the
+     * same name, except headers, which merge by name with the request winning.
+     *
+     * @param  array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    private function effectiveOptions(array $options): array
+    {
+        if ($this->defaultOptions === []) {
+            return $options;
+        }
+
+        $effective = array_merge($this->defaultOptions, $options);
+
+        $defaultHeaders = $this->defaultOptions['headers'] ?? null;
+        $requestHeaders = $options['headers'] ?? null;
+
+        if (is_array($defaultHeaders) && is_array($requestHeaders)) {
+            $effective['headers'] = array_merge($defaultHeaders, $requestHeaders);
+        }
+
+        return $effective;
     }
 
     /**
@@ -60,12 +102,16 @@ final class WiretapHttpClient implements HttpClientInterface
     {
         $recorder = ($this->resolveRecorder)();
 
-        // Resolve against base_uri before gating. Passing the raw argument
-        // showed the gate only `/private` for a base_uri pointing at a blocked
-        // host, so the blocked body was read and only then rejected. Nothing
-        // was stored, but the payload existed — which is what the gate exists
-        // to prevent.
-        if (!$recorder->shouldCapture($this->resolveUrl($url, $options))) {
+        // Everything below decides what to capture, so it has to see the
+        // options the request will actually run with, defaults included.
+        $effective = $this->effectiveOptions($options);
+
+        // Resolve against base_uri before gating, the way Symfony resolves it.
+        // Passing the raw argument showed the gate only `/private` for a
+        // base_uri pointing at a blocked host, so the blocked body was read and
+        // only then rejected. Nothing was stored, but the payload existed —
+        // which is what the gate exists to prevent.
+        if (!$recorder->shouldCapture(UrlResolver::resolve($url, $effective))) {
             return $this->inner->request($method, $url, $options);
         }
 
@@ -74,25 +120,32 @@ final class WiretapHttpClient implements HttpClientInterface
         $sequence = Correlation::nextSequence();
         $correlationId = Correlation::id();
 
-        $requestHeaders = $this->rememberGeneratedCredentials($options, $this->requestHeaders($options));
-        $requestBody = $this->requestBody($options);
+        $requestHeaders = $this->rememberGeneratedCredentials($effective, $this->requestHeaders($effective));
+        $requestBody = $this->requestBody($effective);
 
         $response = $this->inner->request($method, $url, $options);
 
         return new WiretapResponse(
             $response,
-            function (ResponseInterface $resolved, ?\Throwable $error, bool $mayReadBody) use (
+            function (
+                ResponseInterface $resolved,
+                ?\Throwable $error,
+                bool $mayReadBody,
+                bool $mayInitialise
+            ) use (
                 $recorder, $id, $correlationId, $sequence, $method, $url,
                 $requestHeaders, $requestBody, $startedAt
             ): void {
                 $recorder->record($this->buildExchange(
-                    $resolved, $error, $mayReadBody, $id, $correlationId, $sequence,
+                    $resolved, $error, $mayReadBody, $mayInitialise, $id, $correlationId, $sequence,
                     $method, $url, $requestHeaders, $requestBody, $startedAt,
                 ));
             },
             // `buffer => false` means the body can only be read once, so
-            // capture must not be the one to read it.
-            buffered: ($options['buffer'] ?? true) !== false,
+            // capture must not be the one to read it. Read from the effective
+            // options: set through withOptions() it was invisible here, and
+            // capture consumed the application's only read.
+            buffered: ($effective['buffer'] ?? true) !== false,
         );
     }
 
@@ -134,13 +187,21 @@ final class WiretapHttpClient implements HttpClientInterface
      */
     public function withOptions(array $options): static
     {
-        return new self($this->inner->withOptions($options), $this->resolveRecorder, $this->maxBodyBytes);
+        return new self(
+            $this->inner->withOptions($options),
+            $this->resolveRecorder,
+            $this->maxBodyBytes,
+            // Accumulated, because withOptions() can be chained and Symfony
+            // applies every layer.
+            $this->effectiveOptions($options),
+        );
     }
 
     private function buildExchange(
         ResponseInterface $response,
         ?\Throwable $error,
         bool $mayReadBody,
+        bool $mayInitialise,
         string $id,
         string $correlationId,
         int $sequence,
@@ -166,7 +227,7 @@ final class WiretapHttpClient implements HttpClientInterface
             requestBody: $requestBody,
             status: $status,
             reason: null,
-            responseHeaders: $this->responseHeaders($response),
+            responseHeaders: $this->responseHeaders($response, $mayInitialise),
             responseBody: $this->responseBody($response, $status, $mayReadBody),
             timings: $this->timings($info, $startedAt),
             // Not `$status === null && ...`: curl can deliver 200 headers and
@@ -213,6 +274,35 @@ final class WiretapHttpClient implements HttpClientInterface
     }
 
     /**
+     * Whether a decoded payload holds an object at any depth.
+     *
+     * Deliberately inspects nothing about the objects it finds. Anything that
+     * reads from one — jsonSerialize(), __toString(), even a property — is
+     * user code running a second time, which is the defect this guards
+     * against rather than a way to detect it.
+     */
+    private function containsObject(mixed $value, int $depth = 0): bool
+    {
+        if (is_object($value)) {
+            return true;
+        }
+
+        // A payload nested past this is not one we can describe usefully
+        // anyway, and the recursion has to end somewhere.
+        if (!is_array($value) || $depth > 64) {
+            return false;
+        }
+
+        foreach ($value as $item) {
+            if ($this->containsObject($item, $depth + 1)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @param array<string, mixed> $options
      */
     private function requestBody(array $options): CapturedBody
@@ -223,11 +313,18 @@ final class WiretapHttpClient implements HttpClientInterface
             $json = $options['json'];
 
             // Symfony serialises this itself. Serialising it here as well
-            // invoked user code twice: a JsonSerializable that increments a
-            // counter captured {"counter":1} and transmitted {"counter":2},
-            // and any side effect in jsonSerialize() happened twice. Objects
-            // are therefore described rather than encoded.
-            if (is_object($json)) {
+            // invokes user code twice: a JsonSerializable that increments a
+            // counter captured {"counter":1} and transmitted {"counter":2}, so
+            // the record disagreed with the request, and any side effect in
+            // jsonSerialize() happened twice. A serializer that throws could
+            // stop the request outright.
+            //
+            // Checking only the top level was not enough — ['nested' => $obj]
+            // is an array, so it went straight to json_encode and invoked the
+            // object anyway. The search is for objects anywhere in the
+            // payload, and it must not touch them: no jsonSerialize(), no
+            // __toString(), no property reads.
+            if ($this->containsObject($json)) {
                 return CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, null, 'application/json');
             }
 
@@ -260,26 +357,6 @@ final class WiretapHttpClient implements HttpClientInterface
         return CapturedBody::omitted(CapturedBody::OMITTED_STREAMING);
     }
 
-    /**
-     * The URL as Symfony will actually request it.
-     *
-     * @param array<string, mixed> $options
-     */
-    private function resolveUrl(string $url, array $options): string
-    {
-        $base = $options['base_uri'] ?? null;
-
-        if (!is_string($base) || $base === '') {
-            return $url;
-        }
-
-        // Already absolute.
-        if (preg_match('~^[a-z][a-z0-9+.-]*://~i', $url) === 1) {
-            return $url;
-        }
-
-        return rtrim($base, '/') . '/' . ltrim($url, '/');
-    }
 
     /**
      * @param array<string, mixed> $options
@@ -333,8 +410,32 @@ final class WiretapHttpClient implements HttpClientInterface
         return Headers::fromPairs($pairs);
     }
 
-    private function responseHeaders(ResponseInterface $response): Headers
+    private function responseHeaders(ResponseInterface $response, bool $mayInitialise = true): Headers
     {
+        // getHeaders() resolves the response. From the destructor that is not
+        // ours to do: Symfony raises for an unread 4xx/5xx from the inner
+        // response's own destructor, and only while that response has not been
+        // initialised. Resolving it here made the inner destructor skip its
+        // status check, so a dropped 500 threw on a plain client and nothing
+        // at all on a wrapped one.
+        //
+        // getInfo() reads what is already known without resolving anything, so
+        // it is what the destructor path uses. A response the application
+        // never touched has no headers yet and records none, which is the
+        // honest answer — it is also why this is not the default: a response
+        // that was read has real headers worth recording.
+        if (!$mayInitialise) {
+            $raw = $response->getInfo('response_headers');
+
+            if (!is_array($raw) || $raw === []) {
+                return Headers::empty();
+            }
+
+            $lines = array_filter($raw, 'is_string');
+
+            return Headers::fromRaw(implode("\r\n", $lines));
+        }
+
         try {
             $pairs = [];
 
@@ -405,13 +506,23 @@ final class WiretapHttpClient implements HttpClientInterface
     {
         $size = strlen($body);
 
+        // Over the ceiling the body is omitted, not truncated.
+        //
+        // Truncating produced a JSON prefix the redactor cannot decode, so
+        // configured body_paths silently did nothing and a field the operator
+        // had named was persisted in full inside the prefix. Raising the
+        // ceiling only moves that: whatever the number, a body one byte over
+        // it was redacted by nothing. Structured redaction needs the whole
+        // document or none of it, which is the same conclusion core reaches
+        // when it cannot inspect a body.
+        //
+        // The size and content type are still recorded, so the exchange shows
+        // what was sent and why it is not here.
         if ($size > $this->maxBodyBytes) {
-            return CapturedBody::captured(
-                bytes: substr($body, 0, $this->maxBodyBytes),
-                size: $size,
-                contentType: $contentType,
-                truncated: true,
-                sha256: hash('sha256', $body),
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_NOT_READABLE,
+                $size,
+                $contentType,
             );
         }
 
