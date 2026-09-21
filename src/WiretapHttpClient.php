@@ -274,6 +274,35 @@ final class WiretapHttpClient implements HttpClientInterface
     }
 
     /**
+     * Whether a decoded payload holds an object at any depth.
+     *
+     * Deliberately inspects nothing about the objects it finds. Anything that
+     * reads from one — jsonSerialize(), __toString(), even a property — is
+     * user code running a second time, which is the defect this guards
+     * against rather than a way to detect it.
+     */
+    private function containsObject(mixed $value, int $depth = 0): bool
+    {
+        if (is_object($value)) {
+            return true;
+        }
+
+        // A payload nested past this is not one we can describe usefully
+        // anyway, and the recursion has to end somewhere.
+        if (!is_array($value) || $depth > 64) {
+            return false;
+        }
+
+        foreach ($value as $item) {
+            if ($this->containsObject($item, $depth + 1)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @param array<string, mixed> $options
      */
     private function requestBody(array $options): CapturedBody
@@ -284,11 +313,18 @@ final class WiretapHttpClient implements HttpClientInterface
             $json = $options['json'];
 
             // Symfony serialises this itself. Serialising it here as well
-            // invoked user code twice: a JsonSerializable that increments a
-            // counter captured {"counter":1} and transmitted {"counter":2},
-            // and any side effect in jsonSerialize() happened twice. Objects
-            // are therefore described rather than encoded.
-            if (is_object($json)) {
+            // invokes user code twice: a JsonSerializable that increments a
+            // counter captured {"counter":1} and transmitted {"counter":2}, so
+            // the record disagreed with the request, and any side effect in
+            // jsonSerialize() happened twice. A serializer that throws could
+            // stop the request outright.
+            //
+            // Checking only the top level was not enough — ['nested' => $obj]
+            // is an array, so it went straight to json_encode and invoked the
+            // object anyway. The search is for objects anywhere in the
+            // payload, and it must not touch them: no jsonSerialize(), no
+            // __toString(), no property reads.
+            if ($this->containsObject($json)) {
                 return CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, null, 'application/json');
             }
 
@@ -470,13 +506,23 @@ final class WiretapHttpClient implements HttpClientInterface
     {
         $size = strlen($body);
 
+        // Over the ceiling the body is omitted, not truncated.
+        //
+        // Truncating produced a JSON prefix the redactor cannot decode, so
+        // configured body_paths silently did nothing and a field the operator
+        // had named was persisted in full inside the prefix. Raising the
+        // ceiling only moves that: whatever the number, a body one byte over
+        // it was redacted by nothing. Structured redaction needs the whole
+        // document or none of it, which is the same conclusion core reaches
+        // when it cannot inspect a body.
+        //
+        // The size and content type are still recorded, so the exchange shows
+        // what was sent and why it is not here.
         if ($size > $this->maxBodyBytes) {
-            return CapturedBody::captured(
-                bytes: substr($body, 0, $this->maxBodyBytes),
-                size: $size,
-                contentType: $contentType,
-                truncated: true,
-                sha256: hash('sha256', $body),
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_NOT_READABLE,
+                $size,
+                $contentType,
             );
         }
 
