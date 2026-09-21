@@ -81,12 +81,17 @@ final class WiretapHttpClient implements HttpClientInterface
 
         return new WiretapResponse(
             $response,
-            function (ResponseInterface $resolved, ?\Throwable $error, bool $mayReadBody) use (
+            function (
+                ResponseInterface $resolved,
+                ?\Throwable $error,
+                bool $mayReadBody,
+                bool $mayInitialise
+            ) use (
                 $recorder, $id, $correlationId, $sequence, $method, $url,
                 $requestHeaders, $requestBody, $startedAt
             ): void {
                 $recorder->record($this->buildExchange(
-                    $resolved, $error, $mayReadBody, $id, $correlationId, $sequence,
+                    $resolved, $error, $mayReadBody, $mayInitialise, $id, $correlationId, $sequence,
                     $method, $url, $requestHeaders, $requestBody, $startedAt,
                 ));
             },
@@ -141,6 +146,7 @@ final class WiretapHttpClient implements HttpClientInterface
         ResponseInterface $response,
         ?\Throwable $error,
         bool $mayReadBody,
+        bool $mayInitialise,
         string $id,
         string $correlationId,
         int $sequence,
@@ -166,7 +172,7 @@ final class WiretapHttpClient implements HttpClientInterface
             requestBody: $requestBody,
             status: $status,
             reason: null,
-            responseHeaders: $this->responseHeaders($response),
+            responseHeaders: $this->responseHeaders($response, $mayInitialise),
             responseBody: $this->responseBody($response, $status, $mayReadBody),
             timings: $this->timings($info, $startedAt),
             // Not `$status === null && ...`: curl can deliver 200 headers and
@@ -333,8 +339,32 @@ final class WiretapHttpClient implements HttpClientInterface
         return Headers::fromPairs($pairs);
     }
 
-    private function responseHeaders(ResponseInterface $response): Headers
+    private function responseHeaders(ResponseInterface $response, bool $mayInitialise = true): Headers
     {
+        // getHeaders() resolves the response. From the destructor that is not
+        // ours to do: Symfony raises for an unread 4xx/5xx from the inner
+        // response's own destructor, and only while that response has not been
+        // initialised. Resolving it here made the inner destructor skip its
+        // status check, so a dropped 500 threw on a plain client and nothing
+        // at all on a wrapped one.
+        //
+        // getInfo() reads what is already known without resolving anything, so
+        // it is what the destructor path uses. A response the application
+        // never touched has no headers yet and records none, which is the
+        // honest answer — it is also why this is not the default: a response
+        // that was read has real headers worth recording.
+        if (!$mayInitialise) {
+            $raw = $response->getInfo('response_headers');
+
+            if (!is_array($raw) || $raw === []) {
+                return Headers::empty();
+            }
+
+            $lines = array_filter($raw, 'is_string');
+
+            return Headers::fromRaw(implode("\r\n", $lines));
+        }
+
         try {
             $pairs = [];
 

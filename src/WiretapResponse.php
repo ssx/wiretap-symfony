@@ -24,7 +24,7 @@ final class WiretapResponse implements ResponseInterface
     private bool $recorded = false;
 
     /**
-     * @param \Closure(ResponseInterface, ?\Throwable, bool): void $record
+     * @param \Closure(ResponseInterface, ?\Throwable, bool, bool): void $record
      * @param bool $buffered Whether the body can be read again after capture
      */
     public function __construct(
@@ -100,7 +100,15 @@ final class WiretapResponse implements ResponseInterface
         // A response created and never read still happened. Record it rather
         // than lose it — though with no content, since reading it here could
         // block on a transfer the application deliberately abandoned.
-        $this->commit(null, mayReadBody: false);
+        //
+        // mayInitialise: false is what keeps this destructor from changing
+        // what the application sees. Symfony throws for an unread 4xx/5xx from
+        // the inner response's own destructor, but only if that response was
+        // never initialised. Capture used to call getHeaders(false), which
+        // initialises it without throwing — so the inner destructor then
+        // skipped its status check and a dropped 500 raised nothing at all.
+        // The plain client threw; the wrapped one silently succeeded.
+        $this->commit(null, mayReadBody: false, mayInitialise: false);
     }
 
     /**
@@ -156,7 +164,12 @@ final class WiretapResponse implements ResponseInterface
         return $result;
     }
 
-    private function commit(?\Throwable $error, bool $mayReadBody = true): void
+    /**
+     * @param bool $mayInitialise Whether capture is allowed to force the inner
+     *     response to resolve. False only from the destructor, where doing so
+     *     suppresses the application's own exception.
+     */
+    private function commit(?\Throwable $error, bool $mayReadBody = true, bool $mayInitialise = true): void
     {
         if ($this->recorded) {
             return;
@@ -165,7 +178,7 @@ final class WiretapResponse implements ResponseInterface
         $this->recorded = true;
 
         try {
-            ($this->record)($this->inner, $error, $mayReadBody);
+            ($this->record)($this->inner, $error, $mayReadBody, $mayInitialise);
         } catch (\Throwable) {
             // Instrumentation must never change application behaviour.
         }
