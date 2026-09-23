@@ -46,6 +46,14 @@ a destructor backstop for a response that is created and dropped unread.
 | `new GuzzleHttp\Client()` in vendor code | needs [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) |
 | raw `curl_exec()` | needs `ssx/wiretap-auto` |
 
+Running `ssx/wiretap-auto` (v0.0.8 or later) as well records each transfer
+once. The decorator claims the requests it records, in `extra` (a key
+Symfony merges with your defaults one by one, so `default_options.extra.curl`
+is untouched), the retry layer carries it to every attempt, and auto records
+nothing for a claimed transfer. You get the decorator's record, with bodies.
+The claim is only added while auto's hooks are running; otherwise request
+options are exactly what they would be without it.
+
 ## Commands
 
 ```bash

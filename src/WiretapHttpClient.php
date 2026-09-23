@@ -12,6 +12,7 @@ use Ssx\Wiretap\Recorder;
 use Ssx\Wiretap\Symfony\Internal\UrlResolver;
 use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
+use Ssx\Wiretap\TransferClaim;
 use Ssx\Wiretap\TransferError;
 use Symfony\Component\HttpClient\Response\StreamableInterface;
 use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
@@ -125,7 +126,7 @@ final class WiretapHttpClient implements HttpClientInterface
         $requestHeaders = $this->rememberGeneratedCredentials($effective, $this->requestHeaders($effective));
         $requestBody = $this->requestBody($effective);
 
-        $response = $this->inner->request($method, $url, $options);
+        $response = $this->inner->request($method, $url, self::claim($options));
 
         // Only claim StreamableInterface when the inner response has it.
         // Symfony checks for it to offer toStream() and to accept a response
@@ -160,6 +161,42 @@ final class WiretapHttpClient implements HttpClientInterface
             // capture consumed the application's only read.
             buffered: self::isBuffered($effective['buffer'] ?? true),
         );
+    }
+
+    /**
+     * Tell ssx/wiretap-auto's curl hooks that this request is recorded here.
+     *
+     * Without it, running both recorded every call twice, with no link
+     * between the records: once here, with bodies, and once by the hooks
+     * underneath CurlHttpClient. The claim goes in `extra`, which Symfony
+     * merges with the client's defaults key by key, and which every
+     * transport ignores unless it knows the key. It is deliberately not an
+     * `extra.curl` option: a per-request `extra.curl` replaces the client's
+     * default one outright, so adding one would drop curl options the
+     * application configured. The retry layer re-issues these options, so
+     * every attempt is claimed.
+     *
+     * Only when the hooks have said they read it. Otherwise the options are
+     * exactly what they were, and nothing is added for a request this
+     * decorator is not recording, so the hooks still see those.
+     *
+     * @param  array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    private static function claim(array $options): array
+    {
+        if (!TransferClaim::isHonoured()) {
+            return $options;
+        }
+
+        $extra = $options['extra'] ?? [];
+
+        if (is_array($extra) && !array_key_exists(TransferClaim::KEY, $extra)) {
+            $extra[TransferClaim::KEY] = true;
+            $options['extra'] = $extra;
+        }
+
+        return $options;
     }
 
     /**
