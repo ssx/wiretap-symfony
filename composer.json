@@ -28,6 +28,7 @@
         "symfony/framework-bundle": "^6.4 || ^7.0",
         "symfony/http-client": "^6.4 || ^7.0",
         "symfony/console": "^6.4 || ^7.0",
+        "symfony/messenger": "^6.4 || ^7.0",
         "symfony/yaml": "^6.4 || ^7.0",
         "pestphp/pest": "^2.34 || ^3.0",
         "phpstan/phpstan": "^1.11",
