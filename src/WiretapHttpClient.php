@@ -13,6 +13,7 @@ use Ssx\Wiretap\Symfony\Internal\UrlResolver;
 use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
 use Ssx\Wiretap\TransferError;
+use Symfony\Component\HttpClient\Response\StreamableInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use Symfony\Contracts\HttpClient\ResponseStreamInterface;
@@ -125,7 +126,18 @@ final class WiretapHttpClient implements HttpClientInterface
 
         $response = $this->inner->request($method, $url, $options);
 
-        return new WiretapResponse(
+        // Only claim StreamableInterface when the inner response has it.
+        // Symfony checks for it to offer toStream() and to accept a response
+        // as a multipart file part; losing it made toStream() a fatal error
+        // and uploaded an empty part, and claiming it for a response that
+        // lacks it would change behaviour the other way. The instanceof is
+        // safe without symfony/http-client installed: an unknown interface
+        // is simply not matched.
+        $wrapperClass = $response instanceof StreamableInterface
+            ? StreamableWiretapResponse::class
+            : WiretapResponse::class;
+
+        return new $wrapperClass(
             $response,
             function (
                 ResponseInterface $resolved,
@@ -145,8 +157,23 @@ final class WiretapHttpClient implements HttpClientInterface
             // capture must not be the one to read it. Read from the effective
             // options: set through withOptions() it was invisible here, and
             // capture consumed the application's only read.
-            buffered: ($effective['buffer'] ?? true) !== false,
+            buffered: self::isBuffered($effective['buffer'] ?? true),
         );
+    }
+
+    /**
+     * Whether the body can be read again after capture has read it.
+     *
+     * Only `true` and a stream resource guarantee that. A closure decides per
+     * response, from the headers, and nothing reports what it decided —
+     * reading it as "not false" let capture consume the only read of a body
+     * the closure had chosen not to buffer, and the application's own
+     * getContent(false) after a caught exception then threw. Not knowing
+     * means not reading.
+     */
+    private static function isBuffered(mixed $buffer): bool
+    {
+        return $buffer === true || is_resource($buffer);
     }
 
     public function stream(iterable|ResponseInterface $responses, ?float $timeout = null): ResponseStreamInterface
@@ -274,7 +301,8 @@ final class WiretapHttpClient implements HttpClientInterface
     }
 
     /**
-     * Whether a decoded payload holds an object at any depth.
+     * Whether a decoded payload holds an object at any depth, or is nested
+     * too deeply to tell.
      *
      * Deliberately inspects nothing about the objects it finds. Anything that
      * reads from one — jsonSerialize(), __toString(), even a property — is
@@ -287,10 +315,17 @@ final class WiretapHttpClient implements HttpClientInterface
             return true;
         }
 
-        // A payload nested past this is not one we can describe usefully
-        // anyway, and the recursion has to end somewhere.
-        if (!is_array($value) || $depth > 64) {
+        if (!is_array($value)) {
             return false;
+        }
+
+        // The recursion has to end somewhere, and where it ends nothing has
+        // been proven. Answering "no objects" here sent a payload with an
+        // object below the limit to json_encode, and Symfony then serialised
+        // it again — jsonSerialize() side effects ran twice. Unknown is
+        // treated as unsafe: the body is omitted, the request is untouched.
+        if ($depth > 64) {
+            return true;
         }
 
         foreach ($value as $item) {
