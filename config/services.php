@@ -55,6 +55,18 @@ return static function (ContainerConfigurator $container): void {
     // Decorate Symfony's HttpClient. It has no middleware concept, so a
     // decorator is the supported extension point — TraceableHttpClient and the
     // profiler panel work the same way.
+    //
+    // The transport, not `http_client`. Every framework client is built over
+    // http_client.transport: `http_client` itself and each of
+    // framework.http_client.scoped_clients. Decorating `http_client` left the
+    // scoped clients uncaptured altogether. Down here capture also sees the
+    // options each scope adds, and retries arrive as the separate attempts
+    // they are.
+    //
+    // Priority -100 puts this outside the framework's mock_response_factory
+    // client (-10), which never calls the transport it replaces — beneath it,
+    // an application's tests would silently record nothing.
+    //
     // `null` for the invalid behaviour: installing the bundle in an
     // application without symfony/http-client must not fail container
     // compilation. Decoration simply does not happen.
@@ -63,11 +75,16 @@ return static function (ContainerConfigurator $container): void {
     // service. The container builds this client once, and a test calling
     // Wiretap::fake() afterwards must be able to redirect its traffic —
     // otherwise test traffic keeps reaching the configured file sink.
+    //
+    // The last argument is the framework's default_options, filled in by
+    // TransportDefaultsPass.
     $services->set(WiretapHttpClient::class)
-        ->decorate('http_client', null, 250, ContainerInterface::NULL_ON_INVALID_REFERENCE)
+        ->decorate('http_client.transport', null, -100, ContainerInterface::NULL_ON_INVALID_REFERENCE)
         ->args([
             service('.inner')->nullOnInvalid(),
             service(ActiveRecorder::class),
+            1_048_576,
+            [],
         ]);
 
     $services->set(WiretapCommand::class)

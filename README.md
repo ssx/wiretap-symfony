@@ -26,9 +26,12 @@ personal data the moment it was installed would be indefensible.
 ## How it captures
 
 Symfony's HttpClient is not Guzzle and has no middleware concept, so the bundle
-**decorates** `http_client` — the same extension point `TraceableHttpClient`
-and the profiler panel use. Anything injecting `HttpClientInterface` is
-recorded.
+**decorates** `http_client.transport`, the client every framework client is
+built on. A decorator is the same extension point `TraceableHttpClient` and the
+profiler panel use. Anything injecting `HttpClientInterface` is recorded, and
+so is every client under `framework.http_client.scoped_clients`. Credentials
+from `default_options` and from a scope's options are learned as secrets, so an
+echo of one is redacted. With `retry_failed` on, each attempt is its own record.
 
 Symfony's responses are lazy: `request()` returns immediately and the transfer
 only completes when something asks for the status, headers or content. So the
@@ -38,6 +41,7 @@ a destructor backstop for a response that is created and dropped unread.
 | Surface | Covered |
 | --- | --- |
 | `HttpClientInterface` from the container | yes |
+| scoped clients (`framework.http_client.scoped_clients`) | yes |
 | Guzzle clients built in your own code | via [`ssx/wiretap-guzzle`](https://github.com/ssx/wiretap-guzzle) |
 | `new GuzzleHttp\Client()` in vendor code | needs [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) |
 | raw `curl_exec()` | needs `ssx/wiretap-auto` |

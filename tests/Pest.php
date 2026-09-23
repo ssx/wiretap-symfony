@@ -103,3 +103,56 @@ function stopStallingServer(array $handles): void
 
     @unlink($script);
 }
+
+/**
+ * A server that answers every request with the headers it received, as JSON.
+ *
+ * A mock transport cannot show what the real one sends: options applied
+ * inside the transport, such as framework default_options, never reach a
+ * MockHttpClient at all. An echo is also what turns a header nobody learned
+ * into a plaintext secret in the recorded response body.
+ */
+const ECHO_SERVER_PORT = 8795;
+
+function startEchoServer(): array
+{
+    $script = sys_get_temp_dir() . '/wiretap-echo-server.php';
+
+    file_put_contents($script, <<<'SRV'
+        <?php
+        $headers = [];
+        foreach ($_SERVER as $key => $value) {
+            if (str_starts_with($key, 'HTTP_')) {
+                $headers[strtolower(str_replace('_', '-', substr($key, 5)))] = $value;
+            }
+        }
+        header('Content-Type: application/json');
+        echo json_encode(['uri' => $_SERVER['REQUEST_URI'], 'headers' => $headers]);
+        SRV);
+
+    $process = proc_open(
+        sprintf('exec %s -S 127.0.0.1:%d %s', PHP_BINARY, ECHO_SERVER_PORT, escapeshellarg($script)),
+        [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+        $pipes,
+    );
+
+    set_error_handler(static fn (): bool => true);
+
+    try {
+        for ($i = 0; $i < 50; ++$i) {
+            $socket = fsockopen('127.0.0.1', ECHO_SERVER_PORT, $errno, $errstr, 0.1);
+
+            if ($socket !== false) {
+                fclose($socket);
+
+                break;
+            }
+
+            usleep(100_000);
+        }
+    } finally {
+        restore_error_handler();
+    }
+
+    return [$process, $script];
+}
