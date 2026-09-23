@@ -83,6 +83,10 @@ final class Configuration implements ConfigurationInterface
                         ->booleanNode('omit_uninspectable_bodies')->defaultTrue()->end()
                         ->integerNode('max_header_value_bytes')->defaultValue(4096)->end()
                         ->integerNode('min_echoed_secret_length')->defaultValue(8)->end()
+                        // Keys the digest of an omitted or truncated body.
+                        // Null derives one from the kernel secret; an empty
+                        // string keeps no digest.
+                        ->scalarNode('hash_salt')->defaultNull()->end()
                     ->end()
                 ->end()
 
