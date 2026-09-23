@@ -6,6 +6,7 @@ namespace Ssx\Wiretap\Symfony;
 
 use Ssx\Wiretap\Contract\ContextEnricher;
 use Ssx\Wiretap\Exchange;
+use Ssx\Wiretap\Symfony\Internal\Lifecycle;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 
@@ -29,9 +30,17 @@ final readonly class SymfonyContextEnricher implements ContextEnricher
 
             if ($request === null) {
                 // No request in flight: a console command, a messenger worker,
-                // a warm-up. Nothing useful to add, and claiming a route here
-                // would be worse than claiming nothing.
-                return $exchange;
+                // a warm-up. Name the command and the message being handled,
+                // as the console and messenger events reported them — in a
+                // worker that is what made the call, where the process only
+                // says "messenger:consume" for every message it ever handles.
+                // Nothing is taken from argv, and no route is claimed.
+                $context = array_filter([
+                    'command' => Lifecycle::command(),
+                    'message' => Lifecycle::message(),
+                ], static fn (?string $v): bool => $v !== null && $v !== '');
+
+                return $context === [] ? $exchange : $exchange->withContext($context);
             }
 
             $route = $request->attributes->get('_route');

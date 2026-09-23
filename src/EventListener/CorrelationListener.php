@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Ssx\Wiretap\Symfony\EventListener;
 
 use Ssx\Wiretap\Correlation;
+use Ssx\Wiretap\Symfony\Internal\Lifecycle;
 use Symfony\Component\HttpKernel\Event\RequestEvent;
 
 /**
@@ -26,6 +27,10 @@ final class CorrelationListener
             // start a new correlation.
             return;
         }
+
+        // So a command or message started while this request is handled
+        // knows it is part of it, and the request is flushed on terminate.
+        Lifecycle::requestStarted();
 
         $request = $event->getRequest();
 

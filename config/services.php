@@ -11,6 +11,7 @@ use Ssx\Wiretap\Recorder;
 use Ssx\Wiretap\Redaction\Redactor;
 use Ssx\Wiretap\Symfony\Command\WiretapCommand;
 use Ssx\Wiretap\Symfony\EventListener\CorrelationListener;
+use Ssx\Wiretap\Symfony\EventListener\LifecycleListener;
 use Ssx\Wiretap\Symfony\Factory\ActiveRecorder;
 use Ssx\Wiretap\Symfony\Factory\RecorderFactory;
 use Ssx\Wiretap\Symfony\SymfonyContextEnricher;
@@ -52,6 +53,20 @@ return static function (ContainerConfigurator $container): void {
 
     $services->set(CorrelationListener::class)
         ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 1024]);
+
+    // Commands, messenger messages and request termination: each command and
+    // each handled message is its own unit of work, and each is flushed when
+    // it ends. Starts early and ends late, so other listeners on the same
+    // events are inside the unit of work. The messenger events are named by
+    // string so the bundle still compiles without symfony/messenger.
+    $services->set(LifecycleListener::class)
+        ->tag('kernel.event_listener', ['event' => 'console.command', 'method' => 'onConsoleCommand', 'priority' => 2048])
+        ->tag('kernel.event_listener', ['event' => 'console.terminate', 'method' => 'onConsoleTerminate', 'priority' => -2048])
+        ->tag('kernel.event_listener', ['event' => 'kernel.terminate', 'method' => 'onKernelTerminate', 'priority' => -2048])
+        ->tag('kernel.event_listener', ['event' => 'Symfony\\Component\\Messenger\\Event\\WorkerMessageReceivedEvent', 'method' => 'onMessageReceived', 'priority' => 2048])
+        ->tag('kernel.event_listener', ['event' => 'Symfony\\Component\\Messenger\\Event\\WorkerMessageReceivedEvent', 'method' => 'onMessageReceivedLate', 'priority' => -2048])
+        ->tag('kernel.event_listener', ['event' => 'Symfony\\Component\\Messenger\\Event\\WorkerMessageHandledEvent', 'method' => 'onMessageFinished', 'priority' => -2048])
+        ->tag('kernel.event_listener', ['event' => 'Symfony\\Component\\Messenger\\Event\\WorkerMessageFailedEvent', 'method' => 'onMessageFinished', 'priority' => -2048]);
 
     // Decorate Symfony's HttpClient. It has no middleware concept, so a
     // decorator is the supported extension point — TraceableHttpClient and the
