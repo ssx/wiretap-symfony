@@ -34,6 +34,19 @@ function startStallingServer(int $port = STALLING_SERVER_PORT, bool $resumes = f
                 @fclose($c);
                 continue;
             }
+            // One child per connection where possible, so a request never
+            // waits out the previous one's stall and sees a timeout the test
+            // did not intend.
+            if (function_exists('pcntl_fork') && ($pid = pcntl_fork()) > 0) {
+                @fclose($c);
+                continue;
+            }
+            $child = isset($pid) && $pid === 0;
+            if ($child) {
+                // Or an orphan outlives the parent holding the port, and the
+                // next test's server cannot bind it.
+                fclose($s);
+            }
             $length = $resumes ? 14 : 100;
             fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: {$length}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
             fwrite($c, 'partial');
@@ -43,6 +56,9 @@ function startStallingServer(int $port = STALLING_SERVER_PORT, bool $resumes = f
                 fwrite($c, '-rest!!');
             }
             @fclose($c);
+            if ($child) {
+                exit(0);
+            }
         }
         SRV);
 
