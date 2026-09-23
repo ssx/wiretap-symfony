@@ -127,6 +127,9 @@ wiretap:
         omit_uninspectable_bodies: true
         max_header_value_bytes: 4096
         min_echoed_secret_length: 8
+        # Keys the digest of an omitted or truncated body. ~ derives a key from
+        # kernel.secret; '' keeps no digest. See below.
+        hash_salt: ~
 
     sampling:
         rate_basis_points: 10000   # 10000 keeps everything
@@ -142,6 +145,29 @@ wiretap:
 `blocklist` and `redaction.body_paths` are the two worth setting for your
 project. Wiretap cannot know which of your endpoints carry cardholder data, or
 which keys in your payloads are sensitive. You do.
+
+### Digests of bodies that were not stored
+
+A body that is omitted (binary, or dropped by redaction) or truncated keeps a
+digest so you can still tell whether two calls carried the same payload. Core
+only keeps it as an HMAC, never as a plain SHA-256, because a plain hash of a
+short payload can be brute-forced back to the payload. The key defaults to one
+derived from the kernel secret (`hash_hmac('sha256', 'wiretap-redaction',
+kernel.secret)`), kept separate from the key sampling uses, and resolved at
+runtime so an env-backed `APP_SECRET` works.
+
+```yaml
+wiretap:
+    redaction:
+        hash_salt: '%env(WIRETAP_HASH_SALT)%'   # your own key, e.g. to compare digests across installs
+        # hash_salt: ''                         # keep no digest at all
+```
+
+Without a kernel secret (the bundle does not require FrameworkBundle) and no
+`hash_salt`, these bodies keep no digest. The digest itself comes from the
+capture layer: raw curl captured by `ssx/wiretap-auto` always carries one,
+while this bundle's HttpClient decorator does not hash full bodies, so its
+omitted and truncated bodies keep no digest either way.
 
 A blocklisted URL produces **no record at all** — the body is never read. It is
 a gate, not a filter, which is what makes it the right control for cardholder

@@ -42,6 +42,7 @@ final readonly class RecorderFactory
         private array $sampling,
         private ContextEnricher $enricher,
         private ?string $samplingSalt = null,
+        private ?string $redactionSecret = null,
     ) {
     }
 
@@ -146,7 +147,41 @@ final readonly class RecorderFactory
             maxHeaderValueBytes: (int) ($this->redaction['max_header_value_bytes'] ?? $defaults->maxHeaderValueBytes),
             minEchoedSecretLength: (int) ($this->redaction['min_echoed_secret_length'] ?? $defaults->minEchoedSecretLength),
             omitUninspectableBodies: (bool) ($this->redaction['omit_uninspectable_bodies'] ?? true),
+            // hashHint is left at core's default (off), so an absent salt can
+            // never trip core's "hash hints need a hashSalt" check at boot.
+            hashSalt: $this->hashSalt(),
         );
+    }
+
+    /**
+     * The key for the digest core keeps of a body it did not store.
+     *
+     * An omitted or truncated body keeps a digest only as an HMAC under
+     * RedactionConfig::$hashSalt, and none without one: a plain SHA-256 of a
+     * short payload beside its own redaction can be brute-forced back to the
+     * payload. With no salt set, every such body lost the "did this body
+     * change between calls" comparison.
+     *
+     * The default is derived from the kernel secret rather than being the
+     * secret itself, because the sampler is already keyed with it. A labelled
+     * HMAC keeps the two keys independent while needing no new configuration.
+     *
+     * `redaction.hash_salt` overrides it and is used as it is; an empty value
+     * keeps no digest. Without a kernel secret there is no digest either.
+     */
+    private function hashSalt(): ?string
+    {
+        $configured = $this->redaction['hash_salt'] ?? null;
+
+        if (is_string($configured) || is_int($configured) || is_float($configured)) {
+            $configured = (string) $configured;
+
+            return trim($configured) === '' ? null : $configured;
+        }
+
+        return is_string($this->redactionSecret) && trim($this->redactionSecret) !== ''
+            ? hash_hmac('sha256', 'wiretap-redaction', $this->redactionSecret)
+            : null;
     }
 
     /**

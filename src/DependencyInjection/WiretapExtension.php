@@ -29,6 +29,8 @@ final class WiretapExtension extends Extension
         $container->setParameter('wiretap.redaction', $config['redaction']);
         $container->setParameter('wiretap.sampling', $config['sampling']);
         $container->setParameter('wiretap.sampling_salt', $config['sampling_salt']);
+        // Filled in with %kernel.secret% by SamplingSaltPass when there is one.
+        $container->setParameter('wiretap.redaction_secret', null);
     }
 
     public function getAlias(): string
