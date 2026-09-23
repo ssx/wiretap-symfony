@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Symfony;
 
-use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ChunkInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use Symfony\Contracts\HttpClient\ResponseStreamInterface;
@@ -75,10 +74,12 @@ final class WiretapResponseStream implements ResponseStreamInterface
             // Symfony sets the response's `error` info for a terminal failure
             // and leaves it null for an idle timeout. getInfo() reads state
             // without resolving or throwing, unlike the chunk's own isTimeout().
-            $this->commitCurrentFailure();
+            $this->commitCurrentFailure($chunk->getError());
 
             return $chunk;
         }
+
+        $this->wrapperForCurrent()?->noteProgress();
 
         // ResponseStreamInterface extends Iterator, so foreach drives these
         // methods rather than getIterator(). commit() is guarded, so being
@@ -118,25 +119,40 @@ final class WiretapResponseStream implements ResponseStreamInterface
     }
 
     /**
-     * Commit the current response as failed, if its transfer has failed.
+     * Commit the current response as failed, if its transfer has failed, or
+     * remember the idle timeout if it has not.
      */
-    private function commitCurrentFailure(): void
+    private function commitCurrentFailure(?string $chunkError): void
     {
         try {
-            $inner = $this->inner->key();
-            $error = $inner->getInfo('error');
+            $wrapper = $this->wrapperForCurrent();
 
-            if (!is_string($error) || $error === '') {
+            if ($wrapper === null) {
                 return;
             }
 
-            $wrapper = $this->wrappers[$inner] ?? null;
+            $error = $wrapper->inner()->getInfo('error');
 
-            if ($wrapper instanceof WiretapResponse) {
-                $wrapper->commitFromStream(new TransportException($error));
+            if (!is_string($error) || $error === '') {
+                $wrapper->noteIdleTimeout($chunkError);
+
+                return;
             }
+
+            $wrapper->commitFromStream(WiretapResponse::streamFailure($error));
         } catch (\Throwable) {
             // Instrumentation must never change application behaviour.
+        }
+    }
+
+    private function wrapperForCurrent(): ?WiretapResponse
+    {
+        try {
+            $wrapper = $this->wrappers[$this->inner->key()] ?? null;
+
+            return $wrapper instanceof WiretapResponse ? $wrapper : null;
+        } catch (\Throwable) {
+            return null;
         }
     }
 
