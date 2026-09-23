@@ -107,6 +107,30 @@ final class LifecycleOuterCommand extends Command
     }
 }
 
+/**
+ * A call only ssx/wiretap-auto's curl hooks see: vendor code doing its own
+ * curl, which the HTTP client decorator never touches.
+ */
+final class LifecycleCurlCommand extends Command
+{
+    public static string $url = '';
+
+    public function __construct()
+    {
+        parent::__construct('lifecycle:curl');
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $handle = curl_init(self::$url);
+        curl_setopt($handle, CURLOPT_RETURNTRANSFER, true);
+        curl_exec($handle);
+        LifecycleProbe::see('curl');
+
+        return Command::SUCCESS;
+    }
+}
+
 final class LifecycleMockFactory
 {
     public function __invoke(): MockResponse
@@ -132,7 +156,7 @@ function lifecycleKernel(): TestKernel
             $container->register('lifecycle.mock', LifecycleMockFactory::class)->setPublic(true);
             $container->register(LifecyclePingHandler::class, LifecyclePingHandler::class)->setAutowired(true)->addTag('messenger.message_handler');
 
-            foreach ([LifecycleCallCommand::class, LifecycleOuterCommand::class] as $command) {
+            foreach ([LifecycleCallCommand::class, LifecycleOuterCommand::class, LifecycleCurlCommand::class] as $command) {
                 $container->register($command, $command)->setAutowired(true)->addTag('console.command');
             }
         },
@@ -288,6 +312,52 @@ describe('a console command', function (): void {
         expect(Correlation::id())->toBe($requestId)
             ->and(LifecycleProbe::$sink?->all())->toBe([])
             ->and(array_map(static fn (Exchange $e): string => $e->correlationId, lifecycleRecords()))->toBe([$requestId, $requestId]);
+    });
+
+    it('writes a record only the curl hooks saw as soon as it is made', function (): void {
+        // SIGTERM runs no shutdown functions, so a command killed mid-run
+        // lost everything still buffered — including every call made by
+        // vendor code through raw curl, which no decorator can flush after.
+        if (!extension_loaded('opentelemetry') || !class_exists(\Ssx\Wiretap\Auto\Wiretap::class)) {
+            $this->markTestSkipped('needs ext-opentelemetry and ssx/wiretap-auto');
+        }
+
+        \Ssx\Wiretap\Auto\Wiretap::boot();
+        $server = startEchoServer();
+
+        try {
+            LifecycleCurlCommand::$url = 'http://127.0.0.1:' . $server[2] . '/raw';
+            runCommand($this->kernel, ['command' => 'lifecycle:curl']);
+        } finally {
+            stopStallingServer($server);
+        }
+
+        $records = lifecycleRecords();
+
+        expect(LifecycleProbe::$seen)->toBe(['curl:1'])
+            ->and($records)->toHaveCount(1)
+            ->and($records[0]->transport)->toBe(Exchange::TRANSPORT_CURL)
+            ->and($records[0]->context)->toMatchArray(['command' => 'lifecycle:curl']);
+    });
+
+    it('goes back to batching when the command ends', function (): void {
+        // A request served later by the same process must not write on the
+        // request path.
+        $own = $this->kernel->getContainer()->get(Recorder::class);
+
+        runCommand($this->kernel, ['command' => 'lifecycle:call']);
+
+        expect(Wiretap::recorder())->toBe($own);
+    });
+
+    it('leaves a fake alone', function (): void {
+        Wiretap::fake();
+        $fake = Wiretap::recorder();
+
+        runCommand($this->kernel, ['command' => 'lifecycle:call']);
+
+        expect(Wiretap::recorder())->toBe($fake)
+            ->and(Wiretap::isFaked())->toBeTrue();
     });
 
     it('installs no signal handler', function (): void {

@@ -9,7 +9,6 @@ use Ssx\Wiretap\Correlation;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\Recorder;
-use Ssx\Wiretap\Symfony\Internal\Lifecycle;
 use Ssx\Wiretap\Symfony\Internal\UrlResolver;
 use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
@@ -156,12 +155,6 @@ final class WiretapHttpClient implements HttpClientInterface
                     $resolved, $error, $mayReadBody, $mayInitialise, $id, $correlationId, $sequence,
                     $method, $url, $requestHeaders, $requestBody, $startedAt, $observed,
                 ));
-
-                // A long-running command gets no later moment to flush:
-                // SIGTERM runs no shutdown functions. See Lifecycle.
-                if (Lifecycle::flushesEachRecord()) {
-                    $recorder->flush();
-                }
             },
             // `buffer => false` means the body can only be read once, so
             // capture must not be the one to read it. Read from the effective

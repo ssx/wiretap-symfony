@@ -47,6 +47,32 @@ final readonly class RecorderFactory
 
     public function create(): Recorder
     {
+        $recorder = $this->build();
+
+        // Publish to the global holder, so the ssx/wiretap-auto curl hooks —
+        // which run below the container and cannot be injected into — write to
+        // this application's configured sink rather than a default one.
+        Wiretap::setRecorder($recorder);
+
+        return $recorder;
+    }
+
+    /**
+     * The same recorder, writing each record as it is made.
+     *
+     * For a console command that is not a worker: see LifecycleListener.
+     * Core fixes the buffer size at construction, so this is a second
+     * recorder over the first one's sink rather than a setting on it — which
+     * also keeps a sink the application set on the recorder. Not published;
+     * the caller decides when it is in use.
+     */
+    public function writeThrough(Recorder $current): Recorder
+    {
+        return $this->build(maxBufferedRecords: 1)->setSink($current->sink());
+    }
+
+    private function build(int $maxBufferedRecords = 200): Recorder
+    {
         $recorder = new Recorder(
             sink: $this->enabled ? new NdjsonFileSink($this->path) : new NullSink(),
             blocklist: new Blocklist([
@@ -67,17 +93,11 @@ final readonly class RecorderFactory
                     ? $this->samplingSalt
                     : null,
             ),
+            maxBufferedRecords: $maxBufferedRecords,
             enabled: $this->enabled,
         );
 
-        $recorder->addEnricher($this->enricher);
-
-        // Publish to the global holder, so the ssx/wiretap-auto curl hooks —
-        // which run below the container and cannot be injected into — write to
-        // this application's configured sink rather than a default one.
-        Wiretap::setRecorder($recorder);
-
-        return $recorder;
+        return $recorder->addEnricher($this->enricher);
     }
 
     /**
