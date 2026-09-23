@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Symfony;
 
+use Ssx\Wiretap\Symfony\Internal\RecordingStream;
 use Symfony\Component\HttpClient\Response\StreamableInterface;
 
 /**
@@ -15,9 +16,9 @@ use Symfony\Component\HttpClient\Response\StreamableInterface;
  * toStream() at all. The wrapper has to answer that question exactly as the
  * response it wraps would.
  *
- * The stream is the application reading the body, so capture does not read
- * it too. The record is finished by a failure here, or by the destructor
- * once the application is done with the response.
+ * The resource is the application reading the body, and all it keeps. The
+ * wrapper is gone as soon as toStream() returns, so the record is finished
+ * by the resource instead: when it reaches the end, fails, or is closed.
  */
 final class StreamableWiretapResponse extends WiretapResponse implements StreamableInterface
 {
@@ -29,6 +30,21 @@ final class StreamableWiretapResponse extends WiretapResponse implements Streama
         $inner = $this->inner();
         assert($inner instanceof StreamableInterface);
 
-        return $this->resolving(static fn () => $inner->toStream($throw));
+        $stream = $this->resolving(static fn () => $inner->toStream($throw));
+
+        return RecordingStream::wrap(
+            $stream,
+            $this,
+            function (?string $error, bool $complete): void {
+                $this->commitFromStream(
+                    $error !== null ? self::transportFailure($error) : null,
+                    // Read to the end of a buffered body, the content is
+                    // still there, and capturing it costs no network.
+                    // Short of the end nothing may be read or waited for.
+                    mayReadBody: $complete && $this->buffered,
+                    mayInitialise: $complete,
+                );
+            },
+        );
     }
 }

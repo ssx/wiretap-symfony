@@ -24,13 +24,19 @@ class WiretapResponse implements ResponseInterface
     private bool $recorded = false;
 
     /**
+     * The message of an idle timeout the stream yielded for this response,
+     * cleared by anything that arrives after it.
+     */
+    private ?string $pendingTimeout = null;
+
+    /**
      * @param \Closure(ResponseInterface, ?\Throwable, bool, bool): void $record
      * @param bool $buffered Whether the body can be read again after capture
      */
     public function __construct(
         private readonly ResponseInterface $inner,
         private readonly \Closure $record,
-        private readonly bool $buffered = true,
+        protected readonly bool $buffered = true,
     ) {
     }
 
@@ -77,15 +83,66 @@ class WiretapResponse implements ResponseInterface
      * consumed by the caller through the stream, so capture must not read it
      * again.
      */
-    public function commitFromStream(?\Throwable $error = null): void
+    public function commitFromStream(
+        ?\Throwable $error = null,
+        bool $mayReadBody = false,
+        bool $mayInitialise = true,
+    ): void {
+        $this->commit($error, $mayReadBody, $mayInitialise);
+    }
+
+    /**
+     * An idle timeout does not end the transfer, so it is only remembered.
+     * If the application gives up on the response after one — Symfony throws
+     * TimeoutException from the chunk for exactly that — the timeout is the
+     * outcome, and the destructor records it.
+     */
+    public function noteIdleTimeout(?string $message): void
     {
-        $this->commit($error, mayReadBody: false);
+        $this->pendingTimeout = $message !== null && $message !== '' ? $message : 'Idle timeout reached';
+    }
+
+    public function noteProgress(): void
+    {
+        $this->pendingTimeout = null;
+    }
+
+    /**
+     * Symfony's own exception where it is installed, so the record names the
+     * class the application saw. The contracts alone do not ship one.
+     */
+    protected static function transportFailure(string $message, bool $timeout = false): \Throwable
+    {
+        $class = $timeout
+            ? 'Symfony\\Component\\HttpClient\\Exception\\TimeoutException'
+            : 'Symfony\\Component\\HttpClient\\Exception\\TransportException';
+
+        if (class_exists($class)) {
+            $failure = new $class($message);
+
+            if ($failure instanceof \Throwable) {
+                return $failure;
+            }
+        }
+
+        return new \RuntimeException($message);
+    }
+
+    /**
+     * @internal For WiretapResponseStream.
+     */
+    public static function streamFailure(string $message): \Throwable
+    {
+        return self::transportFailure($message);
     }
 
     public function cancel(): void
     {
         $this->inner->cancel();
-        $this->commit(null, mayReadBody: false);
+
+        // RetryableHttpClient cancels an attempt that timed out before it
+        // retries, so a pending timeout is what this attempt ended in.
+        $this->commit($this->pendingTimeoutFailure(), mayReadBody: false);
     }
 
     /**
@@ -109,7 +166,14 @@ class WiretapResponse implements ResponseInterface
         // initialises it without throwing — so the inner destructor then
         // skipped its status check and a dropped 500 raised nothing at all.
         // The plain client threw; the wrapped one silently succeeded.
-        $this->commit(null, mayReadBody: false, mayInitialise: false);
+        $this->commit($this->pendingTimeoutFailure(), mayReadBody: false, mayInitialise: false);
+    }
+
+    private function pendingTimeoutFailure(): ?\Throwable
+    {
+        return $this->pendingTimeout !== null
+            ? self::transportFailure($this->pendingTimeout, timeout: true)
+            : null;
     }
 
     /**
