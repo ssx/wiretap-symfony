@@ -87,6 +87,12 @@ final class Configuration implements ConfigurationInterface
                         // Null derives one from the kernel secret; an empty
                         // string keeps no digest.
                         ->scalarNode('hash_salt')->defaultNull()->end()
+                        // Hash the whole body as it passes through, so a
+                        // body stored only in part keeps that keyed digest.
+                        // Null follows WIRETAP_HASH_FULL_BODY, and is on
+                        // unless that is a false value. Off whatever this
+                        // says while redaction is off or there is no salt.
+                        ->scalarNode('hash_full_body')->defaultNull()->end()
                     ->end()
                 ->end()
 

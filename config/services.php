@@ -94,8 +94,9 @@ return static function (ContainerConfigurator $container): void {
     // Wiretap::fake() afterwards must be able to redirect its traffic —
     // otherwise test traffic keeps reaching the configured file sink.
     //
-    // The last argument is the framework's default_options, filled in by
-    // TransportDefaultsPass.
+    // The fourth argument is the framework's default_options, filled in by
+    // TransportDefaultsPass. The fifth decides full-body hashing at runtime,
+    // because the salt it depends on can come from an env-backed secret.
     $services->set(WiretapHttpClient::class)
         ->decorate('http_client.transport', null, -100, ContainerInterface::NULL_ON_INVALID_REFERENCE)
         ->args([
@@ -103,6 +104,7 @@ return static function (ContainerConfigurator $container): void {
             service(ActiveRecorder::class),
             1_048_576,
             [],
+            [service(RecorderFactory::class), 'hashFullBody'],
         ]);
 
     $services->set(WiretapCommand::class)
