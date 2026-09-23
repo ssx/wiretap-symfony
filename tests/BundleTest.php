@@ -498,7 +498,7 @@ describe('error chunks in a stream', function (): void {
             ->and($plain)->toBe('timeout-chunk');
     });
 
-    it('records an exchange when the stream ends in an error', function (): void {
+    it('records an exchange abandoned after an idle timeout', function (): void {
         $kernel = bootKernel(['enabled' => true, 'path' => $this->path, 'presets' => []]);
 
         $client = new WiretapHttpClient(
@@ -517,6 +517,10 @@ describe('error chunks in a stream', function (): void {
                 break;
             }
         }
+
+        // An idle timeout does not end the transfer, so the record is not
+        // finished until the application lets go of the response.
+        unset($response);
 
         recorder($kernel)->flush();
 

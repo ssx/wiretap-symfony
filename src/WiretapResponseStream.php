@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Symfony;
 
+use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ChunkInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use Symfony\Contracts\HttpClient\ResponseStreamInterface;
@@ -57,9 +58,24 @@ final class WiretapResponseStream implements ResponseStreamInterface
         // was there to retry. Both happened even with capture disabled,
         // because the decorator is always installed.
         if ($chunk->getError() !== null) {
-            // The transfer is over, and the error is the outcome. Record it
-            // without touching anything that throws.
-            $this->commitCurrent();
+            // Two different things arrive as an error chunk, and only one of
+            // them ends the transfer.
+            //
+            // An idle timeout means nothing arrived within the stream's
+            // timeout. The transfer carries on, and the caller may keep
+            // streaming or read the body later. Committing here wrote the
+            // record before the body existed, and the once-only guard then
+            // skipped the read that would have captured it.
+            //
+            // A transport error is terminal. It was committed with no error,
+            // so the record claimed success and always-keep-failures sampling
+            // dropped exactly the attempts it exists to keep — including
+            // every failed attempt RetryableHttpClient retried.
+            //
+            // Symfony sets the response's `error` info for a terminal failure
+            // and leaves it null for an idle timeout. getInfo() reads state
+            // without resolving or throwing, unlike the chunk's own isTimeout().
+            $this->commitCurrentFailure();
 
             return $chunk;
         }
@@ -98,6 +114,29 @@ final class WiretapResponseStream implements ResponseStreamInterface
             yield $this->key() => $this->current();
 
             $this->next();
+        }
+    }
+
+    /**
+     * Commit the current response as failed, if its transfer has failed.
+     */
+    private function commitCurrentFailure(): void
+    {
+        try {
+            $inner = $this->inner->key();
+            $error = $inner->getInfo('error');
+
+            if (!is_string($error) || $error === '') {
+                return;
+            }
+
+            $wrapper = $this->wrappers[$inner] ?? null;
+
+            if ($wrapper instanceof WiretapResponse) {
+                $wrapper->commitFromStream(new TransportException($error));
+            }
+        } catch (\Throwable) {
+            // Instrumentation must never change application behaviour.
         }
     }
 

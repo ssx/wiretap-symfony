@@ -12,24 +12,42 @@ declare(strict_types=1);
  */
 const STALLING_SERVER_PORT = 8793;
 
-function startStallingServer(): array
+/**
+ * A second server that stalls briefly and then finishes the body, so an idle
+ * timeout can be followed by a transfer that completes.
+ */
+const RESUMING_SERVER_PORT = 8794;
+
+function startStallingServer(int $port = STALLING_SERVER_PORT, bool $resumes = false): array
 {
-    $script = sys_get_temp_dir() . '/wiretap-stalling-server.php';
+    $script = sys_get_temp_dir() . '/wiretap-stalling-server-' . $port . '.php';
 
     file_put_contents($script, <<<'SRV'
         <?php
-        $s = stream_socket_server('tcp://127.0.0.1:' . $argv[1], $e, $m);
+        [, $port, $resumes] = $argv;
+        $s = stream_socket_server('tcp://127.0.0.1:' . $port, $e, $m);
         while ($c = @stream_socket_accept($s, 30)) {
-            fread($c, 2048);
-            fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: text/plain\r\n\r\n");
+            // The readiness probe connects and closes without a request.
+            // Answering it would hold this single-threaded server for the
+            // whole stall, and the first real request would queue behind it.
+            if (in_array(fread($c, 2048), ['', false], true)) {
+                @fclose($c);
+                continue;
+            }
+            $length = $resumes ? 14 : 100;
+            fwrite($c, "HTTP/1.1 200 OK\r\nContent-Length: {$length}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
             fwrite($c, 'partial');
-            sleep(3);
+            fflush($c);
+            sleep($resumes ? 1 : 3);
+            if ($resumes) {
+                fwrite($c, '-rest!!');
+            }
             @fclose($c);
         }
         SRV);
 
     $process = proc_open(
-        sprintf('exec %s %s %d', PHP_BINARY, escapeshellarg($script), STALLING_SERVER_PORT),
+        sprintf('exec %s %s %d %d', PHP_BINARY, escapeshellarg($script), $port, $resumes ? 1 : 0),
         [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
         $pipes,
     );
@@ -41,7 +59,7 @@ function startStallingServer(): array
 
     try {
         for ($i = 0; $i < 50; ++$i) {
-            $socket = fsockopen('127.0.0.1', STALLING_SERVER_PORT, $errno, $errstr, 0.1);
+            $socket = fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
 
             if ($socket !== false) {
                 fclose($socket);

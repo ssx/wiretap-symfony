@@ -19,7 +19,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
  * happens exactly once, with the destructor as a backstop for a response that
  * is created and dropped without being read.
  */
-final class WiretapResponse implements ResponseInterface
+class WiretapResponse implements ResponseInterface
 {
     private bool $recorded = false;
 
@@ -73,12 +73,13 @@ final class WiretapResponse implements ResponseInterface
     }
 
     /**
-     * Called when a stream reaches its last chunk. The body was consumed by
-     * the caller through the stream, so capture must not read it again.
+     * Called when a stream reaches its last chunk, or fails. The body was
+     * consumed by the caller through the stream, so capture must not read it
+     * again.
      */
-    public function commitFromStream(): void
+    public function commitFromStream(?\Throwable $error = null): void
     {
-        $this->commit(null, mayReadBody: false);
+        $this->commit($error, mayReadBody: false);
     }
 
     public function cancel(): void
@@ -129,7 +130,7 @@ final class WiretapResponse implements ResponseInterface
      *
      * @return T
      */
-    private function resolving(\Closure $operation): mixed
+    protected function resolving(\Closure $operation): mixed
     {
         try {
             return $operation();
