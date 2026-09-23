@@ -79,7 +79,14 @@ final class WiretapResponseStream implements ResponseStreamInterface
             return $chunk;
         }
 
-        $this->wrapperForCurrent()?->noteProgress();
+        $wrapper = $this->wrapperForCurrent();
+        $wrapper?->noteProgress();
+
+        try {
+            $wrapper?->observeChunk($chunk->getContent(), $chunk->getOffset());
+        } catch (\Throwable) {
+            // Instrumentation must never change application behaviour.
+        }
 
         // ResponseStreamInterface extends Iterator, so foreach drives these
         // methods rather than getIterator(). commit() is guarded, so being
@@ -167,7 +174,7 @@ final class WiretapResponseStream implements ResponseStreamInterface
             $wrapper = $this->wrappers[$inner] ?? null;
 
             if ($wrapper instanceof WiretapResponse) {
-                $wrapper->commitFromStream();
+                $wrapper->commitStreamCompleted();
             }
         } catch (\Throwable) {
             // Instrumentation must never change application behaviour.

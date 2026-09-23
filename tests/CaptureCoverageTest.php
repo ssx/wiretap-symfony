@@ -74,7 +74,7 @@ afterEach(function (): void {
 describe('clients configured in the framework', function (): void {
     beforeEach(function (): void {
         $this->server = startEchoServer();
-        $this->base = 'http://127.0.0.1:' . ECHO_SERVER_PORT;
+        $this->base = 'http://127.0.0.1:' . $this->server[2];
     });
 
     afterEach(function (): void {

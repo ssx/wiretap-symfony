@@ -3,6 +3,27 @@
 declare(strict_types=1);
 
 /**
+ * A port nothing is listening on, chosen by the kernel.
+ *
+ * Fixed ports collided whenever two suites ran at once — this package's on
+ * two framework majors, or alongside another checkout's — and a test then
+ * talked to the other suite's server.
+ */
+function freePort(): int
+{
+    $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+    if ($socket === false) {
+        throw new RuntimeException("No free port: {$errstr}");
+    }
+
+    $name = (string) stream_socket_get_name($socket, false);
+    fclose($socket);
+
+    return (int) substr($name, strrpos($name, ':') + 1);
+}
+
+/**
  * A server that answers, sends part of a body, then stalls.
  *
  * Needed because an ErrorChunk only appears on an *idle timeout*.
@@ -10,16 +31,16 @@ declare(strict_types=1);
  * a closed port makes NativeHttpClient throw before streaming begins — so
  * neither can exercise the chunk-inspection path.
  */
-const STALLING_SERVER_PORT = 8793;
 
 /**
- * A second server that stalls briefly and then finishes the body, so an idle
+ * With $resumes, it stalls briefly and then finishes the body, so an idle
  * timeout can be followed by a transfer that completes.
+ *
+ * @return array{0: resource|false, 1: string, 2: int} process, script, port
  */
-const RESUMING_SERVER_PORT = 8794;
-
-function startStallingServer(int $port = STALLING_SERVER_PORT, bool $resumes = false): array
+function startStallingServer(bool $resumes = false): array
 {
+    $port = freePort();
     $script = sys_get_temp_dir() . '/wiretap-stalling-server-' . $port . '.php';
 
     file_put_contents($script, <<<'SRV'
@@ -89,7 +110,7 @@ function startStallingServer(int $port = STALLING_SERVER_PORT, bool $resumes = f
         restore_error_handler();
     }
 
-    return [$process, $script];
+    return [$process, $script, $port];
 }
 
 function stopStallingServer(array $handles): void
@@ -112,11 +133,14 @@ function stopStallingServer(array $handles): void
  * MockHttpClient at all. An echo is also what turns a header nobody learned
  * into a plaintext secret in the recorded response body.
  */
-const ECHO_SERVER_PORT = 8795;
 
+/**
+ * @return array{0: resource|false, 1: string, 2: int} process, script, port
+ */
 function startEchoServer(): array
 {
-    $script = sys_get_temp_dir() . '/wiretap-echo-server.php';
+    $port = freePort();
+    $script = sys_get_temp_dir() . '/wiretap-echo-server-' . $port . '.php';
 
     file_put_contents($script, <<<'SRV'
         <?php
@@ -131,7 +155,7 @@ function startEchoServer(): array
         SRV);
 
     $process = proc_open(
-        sprintf('exec %s -S 127.0.0.1:%d %s', PHP_BINARY, ECHO_SERVER_PORT, escapeshellarg($script)),
+        sprintf('exec %s -S 127.0.0.1:%d %s', PHP_BINARY, $port, escapeshellarg($script)),
         [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
         $pipes,
     );
@@ -140,7 +164,7 @@ function startEchoServer(): array
 
     try {
         for ($i = 0; $i < 50; ++$i) {
-            $socket = fsockopen('127.0.0.1', ECHO_SERVER_PORT, $errno, $errstr, 0.1);
+            $socket = fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
 
             if ($socket !== false) {
                 fclose($socket);
@@ -154,5 +178,5 @@ function startEchoServer(): array
         restore_error_handler();
     }
 
-    return [$process, $script];
+    return [$process, $script, $port];
 }

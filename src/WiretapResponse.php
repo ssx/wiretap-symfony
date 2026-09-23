@@ -30,13 +30,27 @@ class WiretapResponse implements ResponseInterface
     private ?string $pendingTimeout = null;
 
     /**
-     * @param \Closure(ResponseInterface, ?\Throwable, bool, bool): void $record
+     * The body as it passed through stream(), while it is a complete prefix
+     * of the body and within the ceiling. Null once it is neither.
+     */
+    private ?string $observed = '';
+
+    /** Bytes seen through stream(), counted past the ceiling. */
+    private int $observedBytes = 0;
+
+    /** Whether every byte seen so far arrived through stream(), in order. */
+    private bool $observedContiguous = true;
+
+    /**
+     * @param \Closure(ResponseInterface, ?\Throwable, bool, bool, ?array{0: ?string, 1: int}): void $record
      * @param bool $buffered Whether the body can be read again after capture
+     * @param int $maxObservedBytes How much of a streamed body to keep
      */
     public function __construct(
         private readonly ResponseInterface $inner,
         private readonly \Closure $record,
         protected readonly bool $buffered = true,
+        private readonly int $maxObservedBytes = 1_048_576,
     ) {
     }
 
@@ -89,6 +103,68 @@ class WiretapResponse implements ResponseInterface
         bool $mayInitialise = true,
     ): void {
         $this->commit($error, $mayReadBody, $mayInitialise);
+    }
+
+    /**
+     * Keep a chunk the application is being handed through stream().
+     *
+     * Those bytes are already in memory on their way to the caller, so
+     * keeping them is not a read and cannot block or consume anything. It is
+     * the only way to see the body under retry_failed: AsyncResponse makes
+     * every attempt with `buffer => false` whatever the application asked
+     * for, so the attempt's body can never be read a second time.
+     *
+     * Only a contiguous run from offset 0 counts. A chunk that does not start
+     * where the last one ended means some of the body went elsewhere, and a
+     * record of part of a body presented as all of it would be untrue.
+     */
+    public function observeChunk(string $content, int $offset): void
+    {
+        if ($content === '' || !$this->observedContiguous) {
+            return;
+        }
+
+        if ($offset !== $this->observedBytes) {
+            $this->observedContiguous = false;
+            $this->observed = null;
+
+            return;
+        }
+
+        $this->observedBytes += strlen($content);
+
+        if ($this->observed === null) {
+            return;
+        }
+
+        // Past the ceiling the body will be omitted, so stop holding it; the
+        // count carries on so the record still says how large it was.
+        $this->observed = $this->observedBytes > $this->maxObservedBytes
+            ? null
+            : $this->observed . $content;
+    }
+
+    /**
+     * The last chunk has been handed to the application: the transfer is
+     * complete, so the body is complete too.
+     *
+     * The whole body passed through stream() in order: record that. Otherwise,
+     * a buffered response still holds its complete content, and reading it
+     * back now needs no network and cannot wait. Recording "streaming" for
+     * either threw away a body that was sitting in memory — including for
+     * Symfony's own documented pattern of streaming a response and then
+     * calling toArray() on it, where the once-only guard then skipped the
+     * toArray() that would have captured it.
+     */
+    public function commitStreamCompleted(): void
+    {
+        if ($this->observedContiguous) {
+            $this->commit(null, mayReadBody: false, observed: [$this->observed, $this->observedBytes]);
+
+            return;
+        }
+
+        $this->commit(null, mayReadBody: $this->buffered);
     }
 
     /**
@@ -234,16 +310,27 @@ class WiretapResponse implements ResponseInterface
      *     response to resolve. False only from the destructor, where doing so
      *     suppresses the application's own exception.
      */
-    private function commit(?\Throwable $error, bool $mayReadBody = true, bool $mayInitialise = true): void
-    {
+    /**
+     * @param ?array{0: ?string, 1: int} $observed The body seen through
+     *     stream() and its size, or null when capture has not seen it
+     */
+    private function commit(
+        ?\Throwable $error,
+        bool $mayReadBody = true,
+        bool $mayInitialise = true,
+        ?array $observed = null,
+    ): void {
         if ($this->recorded) {
             return;
         }
 
         $this->recorded = true;
 
+        // Nothing else needs these bytes now.
+        $this->observed = null;
+
         try {
-            ($this->record)($this->inner, $error, $mayReadBody, $mayInitialise);
+            ($this->record)($this->inner, $error, $mayReadBody, $mayInitialise, $observed);
         } catch (\Throwable) {
             // Instrumentation must never change application behaviour.
         }

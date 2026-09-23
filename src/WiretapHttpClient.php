@@ -145,14 +145,15 @@ final class WiretapHttpClient implements HttpClientInterface
                 ResponseInterface $resolved,
                 ?\Throwable $error,
                 bool $mayReadBody,
-                bool $mayInitialise
+                bool $mayInitialise,
+                ?array $observed = null,
             ) use (
                 $recorder, $id, $correlationId, $sequence, $method, $url,
                 $requestHeaders, $requestBody, $startedAt
             ): void {
                 $recorder->record($this->buildExchange(
                     $resolved, $error, $mayReadBody, $mayInitialise, $id, $correlationId, $sequence,
-                    $method, $url, $requestHeaders, $requestBody, $startedAt,
+                    $method, $url, $requestHeaders, $requestBody, $startedAt, $observed,
                 ));
             },
             // `buffer => false` means the body can only be read once, so
@@ -160,6 +161,7 @@ final class WiretapHttpClient implements HttpClientInterface
             // options: set through withOptions() it was invisible here, and
             // capture consumed the application's only read.
             buffered: self::isBuffered($effective['buffer'] ?? true),
+            maxObservedBytes: $this->maxBodyBytes,
         );
     }
 
@@ -262,6 +264,9 @@ final class WiretapHttpClient implements HttpClientInterface
         );
     }
 
+    /**
+     * @param ?array{0: ?string, 1: int} $observed
+     */
     private function buildExchange(
         ResponseInterface $response,
         ?\Throwable $error,
@@ -275,6 +280,7 @@ final class WiretapHttpClient implements HttpClientInterface
         Headers $requestHeaders,
         CapturedBody $requestBody,
         float $startedAt,
+        ?array $observed = null,
     ): Exchange {
         /** @var array<string, mixed> $info */
         $info = $response->getInfo();
@@ -293,7 +299,7 @@ final class WiretapHttpClient implements HttpClientInterface
             status: $status,
             reason: null,
             responseHeaders: $this->responseHeaders($response, $mayInitialise),
-            responseBody: $this->responseBody($response, $status, $mayReadBody),
+            responseBody: $this->responseBody($response, $status, $mayReadBody, $observed),
             timings: $this->timings($info, $startedAt),
             // Not `$status === null && ...`: curl can deliver 200 headers and
             // then fail mid-body. Discarding the error because a status
@@ -429,7 +435,16 @@ final class WiretapHttpClient implements HttpClientInterface
                 return CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, null, 'application/json');
             }
 
-            $encoded = json_encode($json, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            // Symfony's own flags (HttpClientTrait::jsonEncode), so the record
+            // holds the bytes that went on the wire. Encoding with our own
+            // turned 10.0 into 10, and `'`, `&`, `<`, `>`, `"`, `/` and
+            // non-ASCII characters were stored unescaped while the request
+            // carried ', &, \/ and ü: a record that could not
+            // be replayed byte for byte, and whose sha256 matched nothing sent.
+            $encoded = json_encode(
+                $json,
+                JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_PRESERVE_ZERO_FRACTION,
+            );
 
             return $encoded === false
                 ? CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE)
@@ -552,10 +567,32 @@ final class WiretapHttpClient implements HttpClientInterface
         }
     }
 
-    private function responseBody(ResponseInterface $response, ?int $status, bool $mayReadBody): CapturedBody
-    {
+    /**
+     * @param ?array{0: ?string, 1: int} $observed The body as it passed
+     *     through stream(), null past the ceiling, and its size
+     */
+    private function responseBody(
+        ResponseInterface $response,
+        ?int $status,
+        bool $mayReadBody,
+        ?array $observed = null,
+    ): CapturedBody {
         if ($status === null) {
             return CapturedBody::none();
+        }
+
+        if ($observed !== null) {
+            [$content, $size] = $observed;
+
+            if ($size === 0) {
+                return CapturedBody::none();
+            }
+
+            $contentType = self::contentType($response);
+
+            return $content === null
+                ? CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, $size, $contentType)
+                : $this->cap($content, $contentType);
         }
 
         // Reading here when the caller asked for a stream, or only looked at
@@ -579,15 +616,19 @@ final class WiretapHttpClient implements HttpClientInterface
             return CapturedBody::none();
         }
 
-        $contentType = null;
+        return $this->cap($content, self::contentType($response));
+    }
 
+    private static function contentType(ResponseInterface $response): ?string
+    {
         try {
             $contentType = $response->getHeaders(false)['content-type'][0] ?? null;
         } catch (\Throwable) {
             // Headers unavailable; the body is still worth keeping.
+            return null;
         }
 
-        return $this->cap($content, is_string($contentType) ? $contentType : null);
+        return is_string($contentType) ? $contentType : null;
     }
 
     /**
