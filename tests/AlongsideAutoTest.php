@@ -130,3 +130,17 @@ it('records each attempt once through the framework-wired client with retry_fail
         ->and($sink->all())->toHaveCount(2)
         ->and(array_map(static fn ($e): string => $e->transport, $sink->all()))->not->toContain('curl');
 });
+
+it('leaves a transfer to the curl hooks when the decorator is not recording it', function (): void {
+    // The decorator's own recorder is off; the process-wide one the hooks
+    // write to is on. An unclaimed transfer is the hooks' to record, so
+    // switching the bridge off never hides traffic from them.
+    $sink = new InMemorySink();
+    $recorder = Core::setRecorder(new Recorder(sink: $sink, blocklist: new Blocklist()));
+    $client = new WiretapHttpClient(new CurlHttpClient(), new Recorder(sink: new InMemorySink(), enabled: false));
+
+    $client->request('GET', $this->base . '/echo?bridge-off=1')->getContent();
+    $recorder->flush();
+
+    expect(array_map(static fn ($e): string => $e->transport, $sink->all()))->toBe(['curl']);
+});
