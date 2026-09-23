@@ -60,6 +60,7 @@ return static function (ContainerConfigurator $container): void {
     // events are inside the unit of work. The messenger events are named by
     // string so the bundle still compiles without symfony/messenger.
     $services->set(LifecycleListener::class)
+        ->args([service(RecorderFactory::class), service(Recorder::class)])
         ->tag('kernel.event_listener', ['event' => 'console.command', 'method' => 'onConsoleCommand', 'priority' => 2048])
         ->tag('kernel.event_listener', ['event' => 'console.terminate', 'method' => 'onConsoleTerminate', 'priority' => -2048])
         ->tag('kernel.event_listener', ['event' => 'kernel.terminate', 'method' => 'onKernelTerminate', 'priority' => -2048])

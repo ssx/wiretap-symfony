@@ -67,7 +67,11 @@ final class Lifecycle
         Correlation::reset();
     }
 
-    public static function commandStarted(?string $name, bool $worker): void
+    /**
+     * @return bool Whether this command owns its correlation and is not a
+     *     worker: the case that should write each record as it is made
+     */
+    public static function commandStarted(?string $name, bool $worker): bool
     {
         $owns = self::$commands === []
             && self::$messages === []
@@ -76,7 +80,7 @@ final class Lifecycle
         self::$commands[] = ['name' => $name, 'owns' => $owns, 'worker' => $worker];
 
         if (!$owns) {
-            return;
+            return false;
         }
 
         Correlation::reset();
@@ -88,6 +92,8 @@ final class Lifecycle
         if (!$worker) {
             Correlation::start();
         }
+
+        return !$worker;
     }
 
     public static function commandFinished(): void
@@ -149,23 +155,6 @@ final class Lifecycle
         return $frame['class'] ?? null;
     }
 
-    /**
-     * Whether each record should be written as soon as it is made.
-     *
-     * True inside a console command that owns its correlation and is not a
-     * worker. Such a command can run for hours — a daemon, an import, a
-     * scheduler loop — and a process manager stops it with SIGTERM, on which
-     * PHP runs no shutdown functions, so everything buffered was lost on every
-     * deploy. Installing a signal handler to flush changes how applications
-     * shut down, so instead nothing is left buffered to lose. A worker flushes
-     * per message instead, and a request once it is terminated.
-     */
-    public static function flushesEachRecord(): bool
-    {
-        $outer = self::$commands[0] ?? null;
-
-        return $outer !== null && $outer['owns'] && !$outer['worker'];
-    }
 
     /**
      * @internal For tests.

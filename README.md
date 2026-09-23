@@ -96,10 +96,10 @@ tagged with `command` and, in a worker, `message` (the message class).
 Records are written when a request is terminated (so FrankenPHP worker mode,
 RoadRunner and Swoole do not wait for process exit), when each message is
 handled or fails, and when a command ends. Inside a command that is not a
-worker, each record made through the HTTP client is written as it is made:
-a daemon stopped with SIGTERM runs no shutdown functions, and wiretap installs
-no signal handler, so nothing is left buffered to lose. Records made by
-`ssx/wiretap-auto`'s curl hooks in such a command wait for the next flush.
+worker, each record is written as it is made, including those made by
+`ssx/wiretap-auto`'s curl hooks: a daemon stopped with SIGTERM runs no
+shutdown functions, and wiretap installs no signal handler, so nothing is left
+buffered to lose.
 
 ## Configuration reference
 
