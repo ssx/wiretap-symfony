@@ -201,8 +201,8 @@ describe('errors seen while streaming', function (): void {
 
 describe('an idle timeout in a stream', function (): void {
     beforeEach(function (): void {
-        $this->server = startStallingServer(RESUMING_SERVER_PORT, resumes: true);
-        $this->url = 'http://127.0.0.1:' . RESUMING_SERVER_PORT . '/resumes';
+        $this->server = startStallingServer(resumes: true);
+        $this->url = 'http://127.0.0.1:' . $this->server[2] . '/resumes';
     });
 
     afterEach(function (): void {

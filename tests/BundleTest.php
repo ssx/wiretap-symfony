@@ -436,7 +436,7 @@ describe('resource fixes found by review', function (): void {
 describe('error chunks in a stream', function (): void {
     beforeEach(function (): void {
         $this->server = startStallingServer();
-        $this->slowUrl = 'http://127.0.0.1:' . STALLING_SERVER_PORT . '/slow';
+        $this->slowUrl = 'http://127.0.0.1:' . $this->server[2] . '/slow';
     });
 
     afterEach(function (): void {

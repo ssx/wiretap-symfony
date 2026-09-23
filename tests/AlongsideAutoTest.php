@@ -17,7 +17,12 @@ use Symfony\Component\HttpClient\RetryableHttpClient;
  * writing to the same recorder: each transfer must be recorded once, by the
  * decorator, including redirects and retry attempts.
  */
-const ALONGSIDE_PORT = 18794;
+function alongsidePort(): int
+{
+    static $port = null;
+
+    return $port ??= freePort();
+}
 
 beforeAll(function (): void {
     if (!extension_loaded('opentelemetry') || !class_exists(\Ssx\Wiretap\Auto\Wiretap::class)) {
@@ -46,13 +51,13 @@ echo json_encode(['path' => $uri]);
 ROUTER);
 
     $server = proc_open(
-        sprintf('exec %s -S 127.0.0.1:%d -t %s', PHP_BINARY, ALONGSIDE_PORT, escapeshellarg($docroot)),
+        sprintf('exec %s -S 127.0.0.1:%d -t %s', PHP_BINARY, alongsidePort(), escapeshellarg($docroot)),
         [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
         $pipes,
     );
 
     for ($i = 0; $i < 50; ++$i) {
-        $socket = @fsockopen('127.0.0.1', ALONGSIDE_PORT, $errno, $errstr, 0.1);
+        $socket = @fsockopen('127.0.0.1', alongsidePort(), $errno, $errstr, 0.1);
 
         if ($socket !== false) {
             fclose($socket);
@@ -76,7 +81,7 @@ beforeEach(function (): void {
 
     // The package boots itself from its autoload file; this only makes sure.
     \Ssx\Wiretap\Auto\Wiretap::boot();
-    $this->base = 'http://127.0.0.1:' . ALONGSIDE_PORT;
+    $this->base = 'http://127.0.0.1:' . alongsidePort();
 });
 
 afterEach(fn () => Core::reset());
