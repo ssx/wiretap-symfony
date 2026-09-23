@@ -19,6 +19,10 @@ final class TestKernel extends Kernel
     public function __construct(
         private readonly array $wiretapConfig = [],
         private readonly string $uniqueId = '',
+        /** @var array<string, mixed> Replaces top-level framework keys */
+        private readonly array $frameworkConfig = [],
+        /** @var (\Closure(ContainerBuilder): void)|null */
+        private readonly ?\Closure $configure = null,
     ) {
         parent::__construct('test', true);
     }
@@ -31,7 +35,7 @@ final class TestKernel extends Kernel
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
         $loader->load(function (ContainerBuilder $container): void {
-            $container->loadFromExtension('framework', [
+            $container->loadFromExtension('framework', array_replace([
                 'test' => true,
                 'secret' => 'test',
                 'http_method_override' => false,
@@ -40,7 +44,7 @@ final class TestKernel extends Kernel
                 // Without this the http_client service is never registered,
                 // and the decorator has nothing to decorate.
                 'http_client' => ['default_options' => ['timeout' => 5]],
-            ]);
+            ], $this->frameworkConfig));
 
             $container->loadFromExtension('wiretap', $this->wiretapConfig);
 
@@ -50,6 +54,10 @@ final class TestKernel extends Kernel
             $container->register('test.consumer', HttpClientConsumer::class)
                 ->setPublic(true)
                 ->setAutowired(true);
+
+            if ($this->configure !== null) {
+                ($this->configure)($container);
+            }
         });
     }
 
