@@ -6,6 +6,7 @@ namespace Ssx\Wiretap\Symfony;
 
 use Ssx\Wiretap\Recorder;
 use Ssx\Wiretap\Sink\NullSink;
+use Ssx\Wiretap\Symfony\DependencyInjection\Compiler\SamplingSaltPass;
 use Ssx\Wiretap\Symfony\DependencyInjection\Compiler\TransportDefaultsPass;
 use Ssx\Wiretap\Symfony\DependencyInjection\WiretapExtension;
 use Ssx\Wiretap\Wiretap;
@@ -29,6 +30,7 @@ final class WiretapBundle extends Bundle
         parent::build($container);
 
         $container->addCompilerPass(new TransportDefaultsPass());
+        $container->addCompilerPass(new SamplingSaltPass());
     }
 
     public function boot(): void

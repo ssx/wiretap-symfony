@@ -14,6 +14,7 @@ use Ssx\Wiretap\Support\Ulid;
 use Ssx\Wiretap\Timings;
 use Ssx\Wiretap\TransferError;
 use Symfony\Component\HttpClient\Response\StreamableInterface;
+use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use Symfony\Contracts\HttpClient\ResponseStreamInterface;
@@ -261,11 +262,39 @@ final class WiretapHttpClient implements HttpClientInterface
             // then fail mid-body. Discarding the error because a status
             // existed recorded a failed transfer as a success, and
             // always-keep-failures sampling then dropped it.
-            error: $error !== null ? TransferError::fromThrowable($error) : null,
+            error: self::transferError($error, $status),
             startedAt: $startedAt,
             sequence: $sequence,
             pid: getmypid() ?: null,
         );
+    }
+
+    /**
+     * The error to record, without anything taken from the response body.
+     *
+     * Symfony builds an HTTP exception's message from the body: a
+     * problem+json `detail` or `title` goes into it verbatim. The body itself
+     * is omitted or redacted by body_paths, but error.message is not a body,
+     * so the value those rules exist to remove was stored in full a few
+     * fields away. The status already says what happened; the class says how
+     * the application saw it. A transport failure has no response body to
+     * leak, so its message is kept.
+     */
+    private static function transferError(?\Throwable $error, ?int $status): ?TransferError
+    {
+        if ($error === null) {
+            return null;
+        }
+
+        if ($error instanceof HttpExceptionInterface) {
+            return new TransferError(
+                errno: 0,
+                message: $status !== null ? sprintf('HTTP %d response', $status) : 'HTTP error response',
+                class: $error::class,
+            );
+        }
+
+        return TransferError::fromThrowable($error);
     }
 
     /**

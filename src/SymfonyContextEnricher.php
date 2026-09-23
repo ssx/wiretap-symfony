@@ -6,6 +6,7 @@ namespace Ssx\Wiretap\Symfony;
 
 use Ssx\Wiretap\Contract\ContextEnricher;
 use Ssx\Wiretap\Exchange;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
@@ -40,11 +41,47 @@ final readonly class SymfonyContextEnricher implements ContextEnricher
                 'route' => is_string($route) ? $route : null,
                 'controller' => is_string($controller) ? $controller : null,
                 'method' => $request->getMethod(),
-                'uri' => $request->getPathInfo(),
+                'uri' => self::safePath($request, $route),
             ], static fn (mixed $v): bool => $v !== null && $v !== ''));
         } catch (\Throwable) {
             // Enrichment is a nicety. Never let it cost a record.
             return $exchange;
         }
+    }
+
+    /**
+     * The inbound path, only where it cannot carry a value.
+     *
+     * The concrete path of `/reset-password/{token}` holds the token, and
+     * context is not something redaction looks at, so storing it put a
+     * credential into every record the request made. Symfony keeps no route
+     * template on the request, and rebuilding one by matching parameter
+     * values back into the path would be a guess — which the record must not
+     * contain. So the path is kept for a matched route with no parameters,
+     * where it is the template, and otherwise left out: the route name still
+     * says which endpoint it was. Unmatched paths are left out too, since
+     * nothing says what is in them.
+     */
+    private static function safePath(Request $request, mixed $route): ?string
+    {
+        if (!is_string($route) || $route === '') {
+            return null;
+        }
+
+        $parameters = $request->attributes->get('_route_params');
+
+        if (!is_array($parameters)) {
+            return null;
+        }
+
+        foreach (array_keys($parameters) as $name) {
+            // Underscore-prefixed entries (_locale, _format) are routing
+            // defaults Symfony adds; the rest are path variables.
+            if (!str_starts_with((string) $name, '_')) {
+                return null;
+            }
+        }
+
+        return $request->getPathInfo();
     }
 }

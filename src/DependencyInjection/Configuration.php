@@ -47,8 +47,47 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue([])
                         ->end()
                         ->integerNode('max_body_bytes')->defaultValue(65536)->end()
+
+                        // Everything below adds to what core already
+                        // redacts rather than replacing it: naming one extra
+                        // header must not stop Authorization and Cookie being
+                        // removed.
+                        ->arrayNode('headers')
+                            ->info('Extra header names to remove (deny mode), or the only ones to keep (allow mode)')
+                            ->scalarPrototype()->end()
+                            ->defaultValue([])
+                        ->end()
+                        ->arrayNode('query')
+                            ->info('Extra query parameter names to redact')
+                            ->scalarPrototype()->end()
+                            ->defaultValue([])
+                        ->end()
+                        // An enum, so a typo fails the container build rather
+                        // than quietly meaning something else.
+                        ->enumNode('header_mode')
+                            ->values(['deny', 'allow'])
+                            ->defaultValue('deny')
+                        ->end()
+                        ->arrayNode('patterns')
+                            ->info('Built-in detectors to switch on or off, e.g. {email: true}')
+                            ->useAttributeAsKey('name')
+                            ->booleanPrototype()->end()
+                            ->defaultValue([])
+                        ->end()
+                        ->arrayNode('custom')
+                            ->info('Extra regexes applied to header values and bodies')
+                            ->scalarPrototype()->end()
+                            ->defaultValue([])
+                        ->end()
+                        ->booleanNode('safety_net')->defaultTrue()->end()
+                        ->booleanNode('omit_uninspectable_bodies')->defaultTrue()->end()
+                        ->integerNode('max_header_value_bytes')->defaultValue(4096)->end()
+                        ->integerNode('min_echoed_secret_length')->defaultValue(8)->end()
                     ->end()
                 ->end()
+
+                // Keys the sampling decision. Null means the kernel secret.
+                ->scalarNode('sampling_salt')->defaultNull()->end()
 
                 ->arrayNode('sampling')
                     ->addDefaultsIfNotSet()
