@@ -37,6 +37,7 @@ return static function (ContainerConfigurator $container): void {
             '%wiretap.redaction%',
             '%wiretap.sampling%',
             service(SymfonyContextEnricher::class),
+            '%wiretap.sampling_salt%',
         ]);
 
     // The factory also registers this recorder on the global holder, so the

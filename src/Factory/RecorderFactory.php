@@ -41,6 +41,7 @@ final readonly class RecorderFactory
         private array $redaction,
         private array $sampling,
         private ContextEnricher $enricher,
+        private ?string $samplingSalt = null,
     ) {
     }
 
@@ -53,15 +54,18 @@ final readonly class RecorderFactory
                 new ArrayBlocklistProvider($this->blocklist, 'config:wiretap.blocklist'),
                 new EnvBlocklistProvider(),
             ]),
-            redactor: new Redactor(new RedactionConfig(
-                enabled: (bool) ($this->redaction['enabled'] ?? true),
-                bodyPaths: array_values((array) ($this->redaction['body_paths'] ?? [])),
-                maxBodyBytes: (int) ($this->redaction['max_body_bytes'] ?? 65536),
-            )),
+            redactor: new Redactor($this->redactionConfig()),
             sampler: new Sampler(
                 rateBasisPoints: (int) ($this->sampling['rate_basis_points'] ?? 10000),
                 alwaysKeepFailures: (bool) ($this->sampling['always_keep_failures'] ?? true),
                 slowThresholdUs: (int) ($this->sampling['slow_threshold_us'] ?? 2_000_000),
+                // Without a key the decision is a pure function of the
+                // correlation id, which is adopted from an inbound
+                // X-Request-Id or traceparent, so a caller could compute an
+                // id offline that keeps their traffic out of the capture.
+                samplingSalt: is_string($this->samplingSalt) && trim($this->samplingSalt) !== ''
+                    ? $this->samplingSalt
+                    : null,
             ),
             enabled: $this->enabled,
         );
@@ -74,5 +78,70 @@ final readonly class RecorderFactory
         Wiretap::setRecorder($recorder);
 
         return $recorder;
+    }
+
+    /**
+     * The redaction rules, with every option core exposes that the Laravel
+     * bridge exposes too.
+     *
+     * Only enabled, body_paths and max_body_bytes used to be passed through,
+     * so a leak through a header core does not know — an API authenticating
+     * with Ocp-Apim-Subscription-Key, say — could not be fixed from config.
+     *
+     * In deny mode configured names are added to core's defaults, so naming
+     * one extra header does not stop Authorization and Cookie being removed.
+     * In allow mode the configured names are the whole list: merging the
+     * default denylist into an allowlist would keep exactly the headers it
+     * names, X-Api-Key among them.
+     */
+    private function redactionConfig(): RedactionConfig
+    {
+        $defaults = new RedactionConfig();
+        $mode = ($this->redaction['header_mode'] ?? RedactionConfig::MODE_DENY) === RedactionConfig::MODE_ALLOW
+            ? RedactionConfig::MODE_ALLOW
+            : RedactionConfig::MODE_DENY;
+        $headers = self::names($this->redaction['headers'] ?? [], lower: true);
+
+        /** @var array<string, bool> $patterns */
+        $patterns = array_filter(
+            (array) ($this->redaction['patterns'] ?? []),
+            static fn (mixed $v): bool => is_bool($v),
+        );
+
+        return new RedactionConfig(
+            enabled: (bool) ($this->redaction['enabled'] ?? true),
+            headerMode: $mode,
+            headers: $mode === RedactionConfig::MODE_ALLOW
+                ? $headers
+                : array_values(array_unique(array_merge($defaults->headers, $headers))),
+            query: array_values(array_unique(array_merge(
+                $defaults->query,
+                self::names($this->redaction['query'] ?? [], lower: true),
+            ))),
+            bodyPaths: array_values((array) ($this->redaction['body_paths'] ?? [])),
+            patterns: array_merge($defaults->patterns, $patterns),
+            custom: self::names($this->redaction['custom'] ?? []),
+            safetyNet: (bool) ($this->redaction['safety_net'] ?? true),
+            maxBodyBytes: (int) ($this->redaction['max_body_bytes'] ?? $defaults->maxBodyBytes),
+            maxHeaderValueBytes: (int) ($this->redaction['max_header_value_bytes'] ?? $defaults->maxHeaderValueBytes),
+            minEchoedSecretLength: (int) ($this->redaction['min_echoed_secret_length'] ?? $defaults->minEchoedSecretLength),
+            omitUninspectableBodies: (bool) ($this->redaction['omit_uninspectable_bodies'] ?? true),
+        );
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function names(mixed $configured, bool $lower = false): array
+    {
+        $names = [];
+
+        foreach ((array) $configured as $name) {
+            if (is_string($name) && trim($name) !== '') {
+                $names[] = $lower ? strtolower(trim($name)) : $name;
+            }
+        }
+
+        return array_values(array_unique($names));
     }
 }

@@ -74,7 +74,9 @@ inbound `traceparent`, `X-Request-Id` or `X-Correlation-Id`, before anything
 else has a chance to make an outbound call. Sub-requests deliberately do not
 start a new correlation — they are part of the same logical operation.
 
-Each exchange is tagged with the route name, controller, method and path.
+Each exchange is tagged with the route name, controller and method. The path
+is added only for a matched route without parameters: `/reset-password/{token}`
+would otherwise put the token into every record, and context is not redacted.
 
 ## Configuration reference
 
@@ -91,11 +93,27 @@ wiretap:
         enabled: true
         body_paths: []
         max_body_bytes: 65536
+        # Added to core's defaults (Authorization, Cookie, X-Api-Key, ...),
+        # never replacing them. In allow mode `headers` is the only list kept.
+        headers: []                # e.g. ['Ocp-Apim-Subscription-Key']
+        query: []                  # e.g. ['subscription-key']
+        header_mode: deny          # deny | allow
+        patterns: {}               # e.g. {email: true}
+        custom: []                 # extra regexes
+        safety_net: true
+        omit_uninspectable_bodies: true
+        max_header_value_bytes: 4096
+        min_echoed_secret_length: 8
 
     sampling:
         rate_basis_points: 10000   # 10000 keeps everything
         always_keep_failures: true
         slow_threshold_us: 2000000
+
+    # Keys the sampling decision. Defaults to kernel.secret. Without a key the
+    # decision is a function of the correlation id, which a caller controls
+    # through X-Request-Id or traceparent.
+    sampling_salt: ~
 ```
 
 `blocklist` and `redaction.body_paths` are the two worth setting for your
