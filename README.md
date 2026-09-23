@@ -130,6 +130,10 @@ wiretap:
         # Keys the digest of an omitted or truncated body. ~ derives a key from
         # kernel.secret; '' keeps no digest. See below.
         hash_salt: ~
+        # Hash whole bodies as they pass through, so those digests exist for
+        # HttpClient traffic. ~ follows WIRETAP_HASH_FULL_BODY (on unless
+        # false). Off without redaction or a key, whatever this says.
+        hash_full_body: ~
 
     sampling:
         rate_basis_points: 10000   # 10000 keeps everything
@@ -166,8 +170,14 @@ wiretap:
 Without a kernel secret (the bundle does not require FrameworkBundle) and no
 `hash_salt`, these bodies keep no digest. The digest itself comes from the
 capture layer: raw curl captured by `ssx/wiretap-auto` always carries one,
-while this bundle's HttpClient decorator does not hash full bodies, so its
-omitted and truncated bodies keep no digest either way.
+and this bundle's HttpClient decorator hashes each body whenever redaction is
+on and a key is in effect. It hashes only bytes it already holds: a request
+body given as a string, array or `json`, and a response body as the
+application reads it, chunk by chunk through `stream()` or whole through
+`getContent()`. A body that did not pass through whole (cancelled, unbuffered,
+only its status read, a streamed request body) or is over the 1 MiB capture
+ceiling keeps no digest. Hashing costs roughly 0.4 ms per 64 KiB of body; to
+skip it set `hash_full_body: false` or `WIRETAP_HASH_FULL_BODY=false`.
 
 A blocklisted URL produces **no record at all** — the body is never read. It is
 a gate, not a filter, which is what makes it the right control for cardholder

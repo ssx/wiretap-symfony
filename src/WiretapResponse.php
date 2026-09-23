@@ -42,16 +42,27 @@ class WiretapResponse implements ResponseInterface
     private bool $observedContiguous = true;
 
     /**
-     * @param \Closure(ResponseInterface, ?\Throwable, bool, bool, ?array{0: ?string, 1: int}): void $record
+     * The SHA-256 of the observed body, built chunk by chunk as the chunks
+     * are handed to the application. Dropped with the observed body.
+     */
+    private ?\HashContext $observedHash = null;
+
+    /**
+     * @param \Closure(ResponseInterface, ?\Throwable, bool, bool, ?array{0: ?string, 1: int, 2: ?string}): void $record
      * @param bool $buffered Whether the body can be read again after capture
      * @param int $maxObservedBytes How much of a streamed body to keep
+     * @param bool $hashObserved Whether to hash the streamed body as it passes
      */
     public function __construct(
         private readonly ResponseInterface $inner,
         private readonly \Closure $record,
         protected readonly bool $buffered = true,
         private readonly int $maxObservedBytes = 1_048_576,
+        bool $hashObserved = false,
     ) {
+        if ($hashObserved) {
+            $this->observedHash = hash_init('sha256');
+        }
     }
 
     public function inner(): ResponseInterface
@@ -127,6 +138,7 @@ class WiretapResponse implements ResponseInterface
         if ($offset !== $this->observedBytes) {
             $this->observedContiguous = false;
             $this->observed = null;
+            $this->observedHash = null;
 
             return;
         }
@@ -138,10 +150,22 @@ class WiretapResponse implements ResponseInterface
         }
 
         // Past the ceiling the body will be omitted, so stop holding it; the
-        // count carries on so the record still says how large it was.
-        $this->observed = $this->observedBytes > $this->maxObservedBytes
-            ? null
-            : $this->observed . $content;
+        // count carries on so the record still says how large it was. The
+        // digest stops with it: hashing a body without limit would cost the
+        // application time in its own read loop for a record that keeps none
+        // of the body.
+        if ($this->observedBytes > $this->maxObservedBytes) {
+            $this->observed = null;
+            $this->observedHash = null;
+
+            return;
+        }
+
+        $this->observed .= $content;
+
+        if ($this->observedHash !== null) {
+            hash_update($this->observedHash, $content);
+        }
     }
 
     /**
@@ -159,7 +183,13 @@ class WiretapResponse implements ResponseInterface
     public function commitStreamCompleted(): void
     {
         if ($this->observedContiguous) {
-            $this->commit(null, mayReadBody: false, observed: [$this->observed, $this->observedBytes]);
+            // Only a body that passed through whole has a digest to give.
+            $digest = $this->observed !== null && $this->observedHash !== null
+                ? hash_final($this->observedHash)
+                : null;
+            $this->observedHash = null;
+
+            $this->commit(null, mayReadBody: false, observed: [$this->observed, $this->observedBytes, $digest]);
 
             return;
         }
@@ -311,8 +341,9 @@ class WiretapResponse implements ResponseInterface
      *     suppresses the application's own exception.
      */
     /**
-     * @param ?array{0: ?string, 1: int} $observed The body seen through
-     *     stream() and its size, or null when capture has not seen it
+     * @param ?array{0: ?string, 1: int, 2: ?string} $observed The body seen
+     *     through stream(), its size and SHA-256, or null when capture has
+     *     not seen it
      */
     private function commit(
         ?\Throwable $error,
@@ -328,6 +359,7 @@ class WiretapResponse implements ResponseInterface
 
         // Nothing else needs these bytes now.
         $this->observed = null;
+        $this->observedHash = null;
 
         try {
             ($this->record)($this->inner, $error, $mayReadBody, $mayInitialise, $observed);

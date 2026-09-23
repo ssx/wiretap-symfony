@@ -185,6 +185,43 @@ final readonly class RecorderFactory
     }
 
     /**
+     * Whether the HTTP client decorator hashes the whole body it sees.
+     *
+     * Core keeps a digest of a body it did not store in full — truncated, or
+     * omitted as binary — only as an HMAC under the redaction salt, and it
+     * can only do that when the capture layer supplies the SHA-256 of the
+     * whole body. Supplying one is safe only while core will key it, so this
+     * is on by default only while redaction runs and a salt is in effect,
+     * and off without either whatever `redaction.hash_full_body` says.
+     *
+     * Unset, it follows WIRETAP_HASH_FULL_BODY. Only a recognised false
+     * value turns it off.
+     */
+    public function hashFullBody(): bool
+    {
+        if (!(bool) ($this->redaction['enabled'] ?? true) || $this->hashSalt() === null) {
+            return false;
+        }
+
+        $configured = $this->redaction['hash_full_body'] ?? null;
+
+        if ($configured === null) {
+            $configured = $_SERVER['WIRETAP_HASH_FULL_BODY'] ?? $_ENV['WIRETAP_HASH_FULL_BODY'] ?? getenv('WIRETAP_HASH_FULL_BODY');
+
+            if ($configured === false) {
+                return true;
+            }
+        }
+
+        if ($configured === false || $configured === 0) {
+            return false;
+        }
+
+        return !(is_string($configured)
+            && in_array(strtolower(trim($configured)), ['false', '0', 'off', 'no'], true));
+    }
+
+    /**
      * @return list<string>
      */
     private static function names(mixed $configured, bool $lower = false): array

@@ -36,6 +36,8 @@ final class WiretapHttpClient implements HttpClientInterface
     /** @var \Closure(): Recorder */
     private readonly \Closure $resolveRecorder;
 
+    private readonly bool $hashFullBody;
+
     /**
      * @param Recorder|callable(): Recorder $recorder
      */
@@ -62,10 +64,35 @@ final class WiretapHttpClient implements HttpClientInterface
          * @var array<string, mixed>
          */
         private readonly array $defaultOptions = [],
+        /**
+         * Whether to supply the SHA-256 of each body that passes through
+         * whole, for core to key into the digest of a body it does not store
+         * in full. A callable is asked once, here.
+         *
+         * Only ever over bytes already in hand: a request body the options
+         * carry as a string, a response body the application was handed
+         * through stream() or getContent(). Nothing is read to compute it,
+         * and a body that did not pass through whole, or is past the capture
+         * ceiling, gets none.
+         *
+         * @var bool|callable(): bool
+         */
+        bool|callable $hashFullBody = false,
     ) {
         $this->resolveRecorder = $recorder instanceof Recorder
             ? static fn (): Recorder => $recorder
             : \Closure::fromCallable($recorder);
+
+        if (is_bool($hashFullBody)) {
+            $this->hashFullBody = $hashFullBody;
+        } else {
+            try {
+                $this->hashFullBody = (bool) $hashFullBody();
+            } catch (\Throwable) {
+                // Instrumentation must never change application behaviour.
+                $this->hashFullBody = false;
+            }
+        }
     }
 
     /**
@@ -162,6 +189,7 @@ final class WiretapHttpClient implements HttpClientInterface
             // capture consumed the application's only read.
             buffered: self::isBuffered($effective['buffer'] ?? true),
             maxObservedBytes: $this->maxBodyBytes,
+            hashObserved: $this->hashFullBody,
         );
     }
 
@@ -261,11 +289,12 @@ final class WiretapHttpClient implements HttpClientInterface
             // Accumulated, because withOptions() can be chained and Symfony
             // applies every layer.
             $this->effectiveOptions($options),
+            $this->hashFullBody,
         );
     }
 
     /**
-     * @param ?array{0: ?string, 1: int} $observed
+     * @param ?array{0: ?string, 1: int, 2: ?string} $observed
      */
     private function buildExchange(
         ResponseInterface $response,
@@ -568,8 +597,9 @@ final class WiretapHttpClient implements HttpClientInterface
     }
 
     /**
-     * @param ?array{0: ?string, 1: int} $observed The body as it passed
-     *     through stream(), null past the ceiling, and its size
+     * @param ?array{0: ?string, 1: int, 2: ?string} $observed The body as it
+     *     passed through stream(), null past the ceiling, its size, and its
+     *     SHA-256 when that was taken
      */
     private function responseBody(
         ResponseInterface $response,
@@ -582,7 +612,7 @@ final class WiretapHttpClient implements HttpClientInterface
         }
 
         if ($observed !== null) {
-            [$content, $size] = $observed;
+            [$content, $size, $digest] = $observed;
 
             if ($size === 0) {
                 return CapturedBody::none();
@@ -592,7 +622,7 @@ final class WiretapHttpClient implements HttpClientInterface
 
             return $content === null
                 ? CapturedBody::omitted(CapturedBody::OMITTED_NOT_READABLE, $size, $contentType)
-                : $this->cap($content, $contentType);
+                : $this->cap($content, $contentType, $digest, hashHere: false);
         }
 
         // Reading here when the caller asked for a stream, or only looked at
@@ -644,7 +674,11 @@ final class WiretapHttpClient implements HttpClientInterface
         return Timings::fromElapsedSeconds(microtime(true) - $startedAt);
     }
 
-    private function cap(string $body, ?string $contentType): CapturedBody
+    /**
+     * @param ?string $digest   The body's SHA-256, taken as it passed through
+     * @param bool    $hashHere Whether to take it now when none was supplied
+     */
+    private function cap(string $body, ?string $contentType, ?string $digest = null, bool $hashHere = true): CapturedBody
     {
         $size = strlen($body);
 
@@ -668,6 +702,13 @@ final class WiretapHttpClient implements HttpClientInterface
             );
         }
 
-        return CapturedBody::captured($body, $size, $contentType);
+        // The body is whole and in hand, so its digest reads nothing. Core
+        // keeps it only as an HMAC under the salt when it stores less than
+        // all of it, and drops it without one.
+        if ($digest === null && $hashHere && $this->hashFullBody) {
+            $digest = hash('sha256', $body);
+        }
+
+        return CapturedBody::captured($body, $size, $contentType, sha256: $this->hashFullBody ? $digest : null);
     }
 }
