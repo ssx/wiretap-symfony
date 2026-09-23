@@ -86,6 +86,21 @@ Each exchange is tagged with the route name, controller and method. The path
 is added only for a matched route without parameters: `/reset-password/{token}`
 would otherwise put the token into every record, and context is not redacted.
 
+Console commands and messenger messages are units of work too. Each command
+gets its own correlation, and each message a `messenger:consume` worker
+handles gets its own — the worker itself owns none, so one message never
+shares an id or a sampling decision with the next. A command run from inside
+a request, a message or another command stays part of that one. Records are
+tagged with `command` and, in a worker, `message` (the message class).
+
+Records are written when a request is terminated (so FrankenPHP worker mode,
+RoadRunner and Swoole do not wait for process exit), when each message is
+handled or fails, and when a command ends. Inside a command that is not a
+worker, each record made through the HTTP client is written as it is made:
+a daemon stopped with SIGTERM runs no shutdown functions, and wiretap installs
+no signal handler, so nothing is left buffered to lose. Records made by
+`ssx/wiretap-auto`'s curl hooks in such a command wait for the next flush.
+
 ## Configuration reference
 
 ```yaml
